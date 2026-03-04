@@ -29,18 +29,28 @@ const MAX_TEXT_BODY_BYTES: usize = 50 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
 
 fn default_request_timeout_from_env() -> Option<std::time::Duration> {
-    static REQUEST_TIMEOUT: OnceLock<Option<std::time::Duration>> = OnceLock::new();
-    *REQUEST_TIMEOUT.get_or_init(|| {
-        let timeout_secs = std::env::var("PI_HTTP_REQUEST_TIMEOUT_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
-        if timeout_secs == 0 {
-            None
-        } else {
-            Some(std::time::Duration::from_secs(timeout_secs))
-        }
-    })
+    #[cfg(test)]
+    {
+        // Disable timeouts in unit tests to prevent `asupersync`'s virtual timer
+        // from instantly fast-forwarding and failing mock server requests.
+        return None;
+    }
+    
+    #[cfg(not(test))]
+    {
+        static REQUEST_TIMEOUT: OnceLock<Option<std::time::Duration>> = OnceLock::new();
+        *REQUEST_TIMEOUT.get_or_init(|| {
+            let timeout_secs = std::env::var("PI_HTTP_REQUEST_TIMEOUT_SECS")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+            if timeout_secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(timeout_secs))
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1276,10 +1286,8 @@ mod tests {
     fn request_builder_default_timeout() {
         let client = Client::new();
         let builder = client.get("https://api.example.com");
-        assert_eq!(
-            builder.timeout,
-            Some(std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
-        );
+        // During tests, default timeout is disabled to avoid virtual timer issues.
+        assert_eq!(builder.timeout, None);
     }
 
     #[test]

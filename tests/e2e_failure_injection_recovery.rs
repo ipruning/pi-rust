@@ -567,8 +567,9 @@ fn timeout_stream_hang_surfaces_error() {
         agent_session.run_text("hello".to_string(), |_| {}).await
     });
 
-    assert!(result.is_err(), "Stream timeout should propagate as error");
-    let err_msg = result.unwrap_err().to_string();
+    let msg = result.expect("Stream timeout should return partial message");
+    assert_eq!(msg.stop_reason, StopReason::Error);
+    let err_msg = msg.error_message.expect("msg error");
     assert!(
         err_msg.contains("timed out") || err_msg.contains("timeout") || err_msg.contains("Stream"),
         "Error should contain stream timeout info: {err_msg}"
@@ -696,11 +697,9 @@ fn malformed_stream_without_start_handled() {
     });
 
     // Recovery assertion: agent handles error gracefully
-    assert!(
-        result.is_err(),
-        "Malformed stream should propagate as error"
-    );
-    let err_msg = result.unwrap_err().to_string();
+    let msg = result.expect("Malformed stream should return partial message");
+    assert_eq!(msg.stop_reason, StopReason::Error);
+    let err_msg = msg.error_message.unwrap_or_default();
     harness
         .log()
         .info("result", format!("MALFORMED-1: {err_msg}"));
