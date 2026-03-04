@@ -703,8 +703,7 @@ impl SessionStoreV2 {
                         Some(keep_len) if keep_len > 0 => {
                             let current_len = fs::metadata(&path)?.len();
                             if keep_len < current_len {
-                                let file = OpenOptions::new().write(true).open(&path)?;
-                                file.set_len(keep_len)?;
+                                truncate_file_to(&path, keep_len)?;
                             }
                         }
                         _ => {
@@ -1053,7 +1052,7 @@ impl SessionStoreV2 {
                     break;
                 }
                 line_number = line_number.saturating_add(1);
-                let line_len = u64::try_from(bytes_read)
+                let mut line_len = u64::try_from(bytes_read)
                     .map_err(|_| Error::session("line length exceeds u64"))?;
 
                 if line.trim().is_empty() {
@@ -1072,8 +1071,10 @@ impl SessionStoreV2 {
                                 line_number,
                                 "SessionStoreV2 encountered valid frame missing trailing newline; healing segment"
                             );
-                            let mut f = fs::OpenOptions::new().append(true).open(seg_path)?;
+                            let mut f = secure_open_options().append(true).open(seg_path)?;
                             f.write_all(b"\n")?;
+                            line.push('\n');
+                            line_len += 1;
                         }
                         frame
                     }
@@ -1269,14 +1270,20 @@ impl SessionStoreV2 {
                 .checked_add(1)
                 .ok_or_else(|| Error::session("frame sequence overflow while bootstrapping"))?;
             let segment_path = self.segment_file_path(last.segment_seq);
-            self.current_segment_bytes = fs::metadata(&segment_path)
-                .map(|meta| meta.len())
-                .map_err(|err| {
-                    Error::session(format!(
-                        "failed to stat active segment {} while bootstrapping: {err}",
-                        segment_path.display()
-                    ))
-                })?;
+            let expected_segment_bytes = last.byte_offset.saturating_add(last.byte_length);
+            let actual_segment_bytes = fs::metadata(&segment_path)
+                .map_or(0, |meta| meta.len());
+
+            if actual_segment_bytes > expected_segment_bytes {
+                tracing::warn!(
+                    segment = %segment_path.display(),
+                    expected = expected_segment_bytes,
+                    actual = actual_segment_bytes,
+                    "SessionStoreV2 truncating unindexed trailing bytes from active segment after crash recovery"
+                );
+                truncate_file_to(&segment_path, expected_segment_bytes)?;
+            }
+            self.current_segment_bytes = expected_segment_bytes;
             self.last_entry_id = Some(last.entry_id.clone());
             self.last_crc32c.clone_from(&last.crc32c);
 

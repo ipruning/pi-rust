@@ -5221,9 +5221,7 @@ impl Tool for HashlineEditTool {
                 }
                 "prepend" => {
                     // Insert before the target line
-                    for (i, line) in edit.lines.iter().enumerate() {
-                        lines.insert(edit.start + i, line.clone());
-                    }
+                    lines.splice(edit.start..edit.start, edit.lines.iter().cloned());
                     if !edit.lines.is_empty() {
                         any_change = true;
                     }
@@ -5231,9 +5229,7 @@ impl Tool for HashlineEditTool {
                 "append" => {
                     // Insert after the target line
                     let insert_at = edit.start + 1;
-                    for (i, line) in edit.lines.iter().enumerate() {
-                        lines.insert(insert_at + i, line.clone());
-                    }
+                    lines.splice(insert_at..insert_at, edit.lines.iter().cloned());
                     if !edit.lines.is_empty() {
                         any_change = true;
                     }
