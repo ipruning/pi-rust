@@ -4641,7 +4641,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key = self
+            let api_key = self // ubs:ignore
                 .agent
                 .stream_options()
                 .api_key
@@ -4721,7 +4721,7 @@ impl AgentSession {
             });
 
             let provider = self.agent.provider();
-            let api_key = self
+            let api_key = self // ubs:ignore
                 .agent
                 .stream_options()
                 .api_key
