@@ -122,3 +122,25 @@ parse_*.py
 tests.log
 # Root-level scratch test files (agent-generated debug/repro harnesses)
 /test_*.rs
+
+# Agent debug diff/log files
+_ext_log.diff
+_recent_agent_commits.diff
+_ubs_findings.jsonl
+_ubs_summary.json
+ubs-scan.txt
+ubs-src-results.json
+findings.jsonl
+ubs_crit.jsonl
+
+# Agent-generated fix/debug scripts
+fix_fs.py
+fix_tests.py
+filter_panics.py
+
+# Scratch test binaries and source
+/test_mock*
+/print_env
+/print_env.rs
+src/bin/test_duration.rs
+src/bin/test_time.rs
