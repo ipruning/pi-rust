@@ -425,12 +425,7 @@ pub fn select_model_and_thinking(
                 }
             }
             if selected_model.is_none() {
-                if let Some(found) = matches.iter().find(|m| model_entry_is_ready(m)) {
-                    selected_model = Some(found.clone());
-                }
-            }
-            if selected_model.is_none() {
-                selected_model = Some(matches[0].clone());
+                selected_model = select_preferred_exact_id_match(&matches);
             }
         }
     } else if !scoped_models.is_empty() && !is_continuing {
@@ -673,6 +668,25 @@ fn default_model_from_available(available: &[ModelEntry]) -> ModelEntry {
 
 fn default_model_from_catalog(models: &[ModelEntry]) -> ModelEntry {
     default_model_from_candidates(models)
+}
+
+fn select_preferred_exact_id_match(candidates: &[ModelEntry]) -> Option<ModelEntry> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let ready_candidates: Vec<ModelEntry> = candidates
+        .iter()
+        .filter(|entry| model_entry_is_ready(entry))
+        .cloned()
+        .collect();
+    let preferred_pool = if ready_candidates.is_empty() {
+        candidates
+    } else {
+        ready_candidates.as_slice()
+    };
+
+    Some(default_model_from_candidates(preferred_pool))
 }
 
 fn default_model_from_candidates(candidates: &[ModelEntry]) -> ModelEntry {
@@ -979,11 +993,13 @@ fn try_match_model(pattern: &str, available_models: &[ModelEntry]) -> Option<Mod
         }
     }
 
-    if let Some(found) = available_models
+    let exact_matches: Vec<ModelEntry> = available_models
         .iter()
-        .find(|m| m.model.id.eq_ignore_ascii_case(pattern))
-    {
-        return Some(found.clone());
+        .filter(|m| m.model.id.eq_ignore_ascii_case(pattern))
+        .cloned()
+        .collect();
+    if let Some(found) = select_preferred_exact_id_match(&exact_matches) {
+        return Some(found);
     }
 
     let pattern_lower = pattern.to_lowercase();
@@ -1385,6 +1401,47 @@ mod tests {
     }
 
     #[test]
+    fn select_model_and_thinking_model_only_prefers_openai_codex_for_duplicate_latest_id() {
+        let cli = cli::Cli::parse_from(["pi", "--model", "gpt-5.4"]);
+        let config = Config::default();
+        let session = Session::in_memory();
+        let registry = registry_with_entries(vec![
+            test_model_entry("gpt-5.4", "openai", true),
+            test_model_entry("gpt-5.4", "openai-codex", true),
+        ]);
+
+        let selection =
+            select_model_and_thinking(&cli, &config, &session, &registry, &[], Path::new("/tmp"))
+                .expect("duplicate exact-id matches should honor preferred provider ordering");
+
+        assert_eq!(selection.model_entry.model.provider, "openai-codex");
+        assert_eq!(selection.model_entry.model.id, "gpt-5.4");
+    }
+
+    #[test]
+    fn select_model_and_thinking_model_only_prefers_ready_duplicate_exact_id_match() {
+        let model_id = "__test-ready-duplicate-model__";
+        let cli = cli::Cli::parse_from(["pi", "--model", model_id]);
+        let config = Config {
+            default_provider: None,
+            ..Config::default()
+        };
+        let session = Session::in_memory();
+        let mut codex = test_model_entry(model_id, "openai-codex", true);
+        codex.api_key = None;
+        codex.auth_header = true;
+        let registry =
+            registry_with_entries(vec![test_model_entry(model_id, "openai", true), codex]);
+
+        let selection =
+            select_model_and_thinking(&cli, &config, &session, &registry, &[], Path::new("/tmp"))
+                .expect("duplicate exact-id matches should still prefer ready entries");
+
+        assert_eq!(selection.model_entry.model.provider, "openai");
+        assert_eq!(selection.model_entry.model.id, model_id);
+    }
+
+    #[test]
     fn select_model_and_thinking_scoped_models_prefers_default_provider_alias() {
         let cli = cli::Cli::parse_from(["pi"]);
         let config = Config {
@@ -1491,6 +1548,21 @@ mod tests {
         assert_eq!(matched.model.id, "google/gemini-2.5-pro");
         assert_eq!(matched.model.api, "openai-completions");
         assert_eq!(matched.model.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn try_match_model_prefers_openai_codex_for_duplicate_exact_id_matches() {
+        let matched = try_match_model(
+            "gpt-5.4",
+            &[
+                test_model_entry("gpt-5.4", "openai", true),
+                test_model_entry("gpt-5.4", "openai-codex", true),
+            ],
+        )
+        .expect("duplicate exact-id matches should honor preferred provider ordering");
+
+        assert_eq!(matched.model.provider, "openai-codex");
+        assert_eq!(matched.model.id, "gpt-5.4");
     }
 
     #[test]
