@@ -1300,7 +1300,9 @@ const WASM_POLYFILL_JS: &str = r#"
       this.grow = function(delta) {
         var old = this._pages;
         this._pages += delta;
-        this._buffer = new ArrayBuffer(this._pages * 65536);
+        var nextBuffer = new ArrayBuffer(this._pages * 65536);
+        new Uint8Array(nextBuffer).set(new Uint8Array(this._buffer));
+        this._buffer = nextBuffer;
         return old;
       };
     },
@@ -1939,6 +1941,26 @@ mod tests {
                 )
                 .expect("polyfill memory grow failure");
             assert!(threw_range_error);
+        });
+    }
+
+    #[test]
+    fn js_memory_constructor_grow_preserves_existing_bytes() {
+        run_wasm_test(|ctx, _state| {
+            let summary: String = ctx
+                .eval(
+                    r#"
+                    var mem = new WebAssembly.Memory({ initial: 1 });
+                    var before = new Uint8Array(mem.buffer);
+                    before[0] = 7;
+                    before[65535] = 9;
+                    var prev = mem.grow(1);
+                    var after = new Uint8Array(mem.buffer);
+                    [prev, after.byteLength, after[0], after[65535], after[65536]].join(",");
+                "#,
+                )
+                .expect("memory constructor grow preserves bytes");
+            assert_eq!(summary, "1,131072,7,9,0");
         });
     }
 
