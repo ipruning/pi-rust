@@ -16180,7 +16180,11 @@ function __pi_build_extension_ui_template(hasUI) {
             const handlePollResponse = (response) => {
                 if (!response || typeof response !== 'object') return;
                 if (typeof response.width === 'number' && Number.isFinite(response.width)) {
-                    renderWidth = Math.max(20, Math.floor(response.width));
+                    const nextWidth = Math.max(20, Math.floor(response.width));
+                    if (nextWidth !== renderWidth) {
+                        renderWidth = nextWidth;
+                        needsRender = true;
+                    }
                 }
                 if (response.closed || response.cancelled) {
                     done = true;
@@ -20205,6 +20209,185 @@ export default ConfigLoader;
 
             let stats = runtime.tick().await.expect("tick");
             assert!(stats.ran_macrotask);
+        });
+    }
+
+    #[test]
+    fn pijs_custom_ui_width_updates_trigger_reflow() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = PiJsRuntime::with_clock(Arc::clone(&clock))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r"
+                    globalThis.renderWidths = [];
+                    const ui = __pi_make_extension_ui(true);
+                    void ui.custom((_tui, _theme, _keybindings, onDone) => ({
+                        render(width) {
+                            globalThis.renderWidths.push(width);
+                            if (width === 40) {
+                                onDone(width);
+                            }
+                            return [`width:${width}`];
+                        }
+                    }), { width: 80 });
+                    ",
+                )
+                .await
+                .expect("start custom ui");
+
+            let initial_requests = runtime.drain_hostcall_requests();
+            assert_eq!(
+                initial_requests.len(),
+                2,
+                "custom UI should issue an initial poll and first frame"
+            );
+
+            let mut initial_frame_call = None;
+            let mut initial_poll_call = None;
+            for request in initial_requests {
+                match &request.kind {
+                    HostcallKind::Ui { op } if op == "setWidget" => {
+                        initial_frame_call = Some(request);
+                    }
+                    HostcallKind::Ui { op } if op == "custom" => {
+                        initial_poll_call = Some(request);
+                    }
+                    other => panic!("unexpected initial hostcall: {other:?}"),
+                }
+            }
+
+            let initial_frame_call = initial_frame_call.expect("initial frame hostcall");
+            assert_eq!(
+                initial_frame_call.payload["lines"],
+                serde_json::json!(["width:80"])
+            );
+            runtime.complete_hostcall(
+                initial_frame_call.call_id,
+                HostcallOutcome::Success(serde_json::json!(null)),
+            );
+
+            let initial_poll_call = initial_poll_call.expect("initial poll hostcall");
+            runtime.complete_hostcall(
+                initial_poll_call.call_id,
+                HostcallOutcome::Success(serde_json::json!({ "width": 80 })),
+            );
+
+            runtime
+                .tick()
+                .await
+                .expect("deliver initial frame completion");
+            runtime
+                .tick()
+                .await
+                .expect("deliver initial poll completion");
+            assert_eq!(
+                get_global_json(&runtime, "renderWidths").await,
+                serde_json::json!([80])
+            );
+
+            for now in [16, 32] {
+                clock.set(now);
+                let stats = runtime.tick().await.expect("tick poll timer");
+                assert!(stats.ran_macrotask, "poll timer should fire at {now}ms");
+
+                let poll_requests = runtime.drain_hostcall_requests();
+                assert_eq!(
+                    poll_requests.len(),
+                    1,
+                    "expected one poll request at {now}ms"
+                );
+                let poll_request = poll_requests.into_iter().next().expect("poll request");
+                assert!(
+                    matches!(&poll_request.kind, HostcallKind::Ui { op } if op == "custom"),
+                    "expected custom poll request at {now}ms"
+                );
+
+                runtime.complete_hostcall(
+                    poll_request.call_id,
+                    HostcallOutcome::Success(serde_json::json!({ "width": 80 })),
+                );
+                runtime.tick().await.expect("deliver poll completion");
+            }
+
+            clock.set(34);
+            let stats = runtime.tick().await.expect("tick render timer");
+            assert!(
+                stats.ran_macrotask,
+                "initial dirty render should fire once at 34ms"
+            );
+
+            let initial_rerender_requests = runtime.drain_hostcall_requests();
+            let initial_rerender = initial_rerender_requests
+                .into_iter()
+                .find(
+                    |request| matches!(&request.kind, HostcallKind::Ui { op } if op == "setWidget"),
+                )
+                .expect("initial dirty render should enqueue a frame");
+            assert_eq!(
+                initial_rerender.payload["lines"],
+                serde_json::json!(["width:80"])
+            );
+            runtime.complete_hostcall(
+                initial_rerender.call_id,
+                HostcallOutcome::Success(serde_json::json!(null)),
+            );
+            runtime
+                .tick()
+                .await
+                .expect("deliver initial rerender completion");
+
+            for now in [48, 64] {
+                clock.set(now);
+                let stats = runtime.tick().await.expect("tick width-change poll timer");
+                assert!(stats.ran_macrotask, "poll timer should fire at {now}ms");
+
+                let poll_requests = runtime.drain_hostcall_requests();
+                assert_eq!(
+                    poll_requests.len(),
+                    1,
+                    "expected one poll request at {now}ms"
+                );
+                let poll_request = poll_requests.into_iter().next().expect("poll request");
+                assert!(
+                    matches!(&poll_request.kind, HostcallKind::Ui { op } if op == "custom"),
+                    "expected custom poll request at {now}ms"
+                );
+
+                runtime.complete_hostcall(
+                    poll_request.call_id,
+                    HostcallOutcome::Success(serde_json::json!({ "width": 40 })),
+                );
+                runtime
+                    .tick()
+                    .await
+                    .expect("deliver width-change poll completion");
+            }
+
+            clock.set(67);
+            let stats = runtime
+                .tick()
+                .await
+                .expect("tick render timer after resize");
+            assert!(
+                stats.ran_macrotask,
+                "render timer should fire after width change"
+            );
+
+            let reflow_requests = runtime.drain_hostcall_requests();
+            let reflow_frame = reflow_requests
+                .into_iter()
+                .find(
+                    |request| matches!(&request.kind, HostcallKind::Ui { op } if op == "setWidget"),
+                )
+                .expect("width change should trigger a reflow frame");
+            assert_eq!(
+                reflow_frame.payload["lines"],
+                serde_json::json!(["width:40"])
+            );
         });
     }
 
