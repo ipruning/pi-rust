@@ -387,7 +387,7 @@ impl PackageManager {
         Ok(match parsed {
             ParsedSource::Npm { name, .. } => self.npm_install_path(&name, scope)?,
             ParsedSource::Git { host, path, .. } => {
-                Some(self.git_install_path(&host, &path, scope))
+                Some(self.checked_git_install_path(&host, &path, scope)?)
             }
             ParsedSource::Local { path } => Some(path),
         })
@@ -502,7 +502,8 @@ impl PackageManager {
                     );
                 }
                 ParsedSource::Git { host, path, .. } => {
-                    let installed_path = self.git_install_path(&host, &path, entry.scope);
+                    let installed_path =
+                        self.checked_git_install_path(&host, &path, entry.scope)?;
                     if !installed_path.exists() {
                         return Ok(None);
                     }
@@ -1016,7 +1017,7 @@ impl PackageManager {
                 pinned,
                 ..
             } => {
-                let installed_path = self.git_install_path(&host, &path, scope);
+                let installed_path = self.checked_git_install_path(&host, &path, scope)?;
                 if !installed_path.exists() {
                     return Err(Error::tool(
                         "package_manager",
@@ -1171,6 +1172,22 @@ impl PackageManager {
         }
     }
 
+    fn checked_git_install_path(
+        &self,
+        host: &str,
+        repo_path: &str,
+        scope: PackageScope,
+    ) -> Result<PathBuf> {
+        if host.trim().is_empty() || repo_path.trim().is_empty() {
+            return Err(Error::tool(
+                "package_manager",
+                "Invalid git package source: remote repositories must include both a host and repository path",
+            ));
+        }
+
+        Ok(self.git_install_path(host, repo_path, scope))
+    }
+
     fn install_npm(&self, spec: &str, scope: PackageScope) -> Result<()> {
         let (name, _) = parse_npm_spec(spec);
         match scope {
@@ -1248,7 +1265,7 @@ impl PackageManager {
         r#ref: Option<&str>,
         scope: PackageScope,
     ) -> Result<()> {
-        let target_dir = self.git_install_path(host, repo_path, scope);
+        let target_dir = self.checked_git_install_path(host, repo_path, scope)?;
         if target_dir.exists() {
             return Ok(());
         }
@@ -1303,7 +1320,7 @@ impl PackageManager {
             return Ok(());
         }
 
-        let target_dir = self.git_install_path(host, repo_path, scope);
+        let target_dir = self.checked_git_install_path(host, repo_path, scope)?;
         if !target_dir.exists() {
             return self.install_git(repo, host, repo_path, None, scope);
         }
@@ -1320,7 +1337,7 @@ impl PackageManager {
     }
 
     fn remove_git(&self, host: &str, repo_path: &str, scope: PackageScope) -> Result<()> {
-        let target_dir = self.git_install_path(host, repo_path, scope);
+        let target_dir = self.checked_git_install_path(host, repo_path, scope)?;
         if !target_dir.exists() {
             return Ok(());
         }
@@ -1616,7 +1633,8 @@ impl PackageManager {
                     ..
                 } => {
                     // Offload git_install_path
-                    let installed_path = self.git_install_path(&host, &path, entry.scope);
+                    let installed_path =
+                        self.checked_git_install_path(&host, &path, entry.scope)?;
 
                     if !installed_path.exists() {
                         self.install(source_str, entry.scope).await?;
@@ -3821,6 +3839,31 @@ mod tests {
                 .join(key),
             "local git sources should map to a stable hashed install directory",
         );
+    }
+
+    #[test]
+    fn remove_sync_rejects_git_host_only_source_without_deleting_host_bucket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = PackageManager::new(dir.path().to_path_buf());
+        let host_bucket = dir
+            .path()
+            .join(Config::project_dir())
+            .join("git")
+            .join("github.com");
+        let repo_dir = host_bucket.join("user").join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+        fs::write(repo_dir.join("package.json"), "{}").expect("write sentinel");
+
+        let err = manager
+            .remove_sync("git:github.com", PackageScope::Project)
+            .expect_err("host-only git source should be rejected");
+
+        assert!(
+            err.to_string().contains("Invalid git package source"),
+            "unexpected error: {err}"
+        );
+        assert!(host_bucket.exists(), "host bucket should be preserved");
+        assert!(repo_dir.exists(), "nested repo should be preserved");
     }
 
     #[test]

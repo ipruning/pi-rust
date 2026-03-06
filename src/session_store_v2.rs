@@ -1015,11 +1015,12 @@ impl SessionStoreV2 {
         let segment_files = self.list_segment_files()?;
         let mut last_observed_seq = 0u64;
 
-        'segments: for (i, (_seg_seq, seg_path)) in segment_files.iter().enumerate() {
+        'segments: for (i, (segment_seq, seg_path)) in segment_files.iter().enumerate() {
             let file = File::open(seg_path)?;
             let mut reader = BufReader::new(file);
             let mut byte_offset = 0u64;
             let mut line_number = 0u64;
+            let mut expected_frame_seq = 1u64;
             let mut line = String::new();
 
             loop {
@@ -1097,6 +1098,22 @@ impl SessionStoreV2 {
                     }
                 };
 
+                if frame.segment_seq != *segment_seq || frame.frame_seq != expected_frame_seq {
+                    tracing::warn!(
+                        segment = %seg_path.display(),
+                        line_number,
+                        expected_segment_seq = *segment_seq,
+                        actual_segment_seq = frame.segment_seq,
+                        expected_frame_seq,
+                        actual_frame_seq = frame.frame_seq,
+                        "SessionStoreV2 detected mismatched embedded frame coordinates during rebuild; truncating segment and quarantining subsequent segments"
+                    );
+                    drop(reader);
+                    truncate_file_to(seg_path, byte_offset)?;
+                    quarantine_segment_tail(&segment_files[i + 1..])?;
+                    break 'segments;
+                }
+
                 if frame.entry_seq <= last_observed_seq {
                     tracing::warn!(
                         segment = %seg_path.display(),
@@ -1119,8 +1136,8 @@ impl SessionStoreV2 {
                     schema: Cow::Borrowed(OFFSET_INDEX_SCHEMA),
                     entry_seq: frame.entry_seq,
                     entry_id: frame.entry_id.clone(),
-                    segment_seq: frame.segment_seq,
-                    frame_seq: frame.frame_seq,
+                    segment_seq: *segment_seq,
+                    frame_seq: expected_frame_seq,
                     byte_offset,
                     byte_length: line_len,
                     crc32c: crc.clone(),
@@ -1136,6 +1153,9 @@ impl SessionStoreV2 {
 
                 byte_offset = byte_offset.saturating_add(line_len);
                 rebuilt_count = rebuilt_count.saturating_add(1);
+                expected_frame_seq = expected_frame_seq
+                    .checked_add(1)
+                    .ok_or_else(|| Error::session("frame sequence overflow during rebuild"))?;
             }
         }
 
@@ -1335,6 +1355,7 @@ fn is_recoverable_index_error(error: &Error) -> bool {
             lower.contains("checksum mismatch")
                 || lower.contains("index out of bounds")
                 || lower.contains("index/frame mismatch")
+                || lower.contains("index references missing frame")
                 || lower.contains("payload integrity mismatch")
                 || lower.contains("entry sequence is not strictly increasing")
                 || lower.contains("index byte range overflow")
@@ -1682,6 +1703,65 @@ mod proptests {
             b"old"
         );
         assert_eq!(fs::read(&backup).expect("read new backup"), b"new");
+    }
+
+    #[test]
+    fn create_recovers_from_index_row_that_references_missing_segment() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("store");
+        let mut store = SessionStoreV2::create(&root, 4096).expect("create store");
+        store
+            .append_entry("entry-1", None, "message", json!({"n": 1}))
+            .expect("append entry");
+
+        let mut rows = store.read_index().expect("read index");
+        assert_eq!(rows.len(), 1);
+        rows[0].segment_seq = 999;
+        write_jsonl_lines(&store.index_file_path(), &rows).expect("write corrupted index");
+        drop(store);
+
+        let reopened = SessionStoreV2::create(&root, 4096).expect("reopen store");
+        assert_eq!(reopened.entry_count(), 1);
+
+        let rebuilt_rows = reopened.read_index().expect("read rebuilt index");
+        assert_eq!(rebuilt_rows.len(), 1);
+        assert_eq!(rebuilt_rows[0].segment_seq, 1);
+        assert!(reopened.lookup_entry(1).expect("lookup entry").is_some());
+    }
+
+    #[test]
+    fn create_drops_frame_with_mismatched_embedded_segment_seq_during_rebuild() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("store");
+        let mut store = SessionStoreV2::create(&root, 4096).expect("create store");
+        store
+            .append_entry("entry-1", None, "message", json!({"n": 1}))
+            .expect("append first entry");
+        store
+            .append_entry(
+                "entry-2",
+                Some("entry-1".to_string()),
+                "message",
+                json!({"n": 2}),
+            )
+            .expect("append second entry");
+
+        let segment_path = store.segment_file_path(1);
+        let mut frames = store.read_segment(1).expect("read segment");
+        assert_eq!(frames.len(), 2);
+        frames[1].segment_seq = 77;
+        write_jsonl_lines(&segment_path, &frames).expect("write corrupted segment");
+        fs::remove_file(store.index_file_path()).expect("remove index");
+        drop(store);
+
+        let reopened = SessionStoreV2::create(&root, 4096).expect("reopen store");
+        assert_eq!(reopened.entry_count(), 1);
+
+        let rebuilt_rows = reopened.read_index().expect("read rebuilt index");
+        assert_eq!(rebuilt_rows.len(), 1);
+        assert_eq!(rebuilt_rows[0].entry_seq, 1);
+        assert_eq!(reopened.read_segment(1).expect("read segment").len(), 1);
+        assert!(reopened.lookup_entry(2).expect("lookup entry").is_none());
     }
 
     // ====================================================================
