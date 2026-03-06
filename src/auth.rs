@@ -1254,7 +1254,7 @@ where
 
     // 3. Stored credentials in auth.json
     let provider = "amazon-bedrock";
-    match auth.get(provider) {
+    match auth.credential_for_provider(provider) {
         Some(AuthCredential::AwsCredentials {
             access_key_id,
             secret_access_key,
@@ -1347,7 +1347,7 @@ where
         client_secret,
         token_url,
         service_url,
-    }) = auth.get(provider)
+    }) = auth.credential_for_provider(provider)
     {
         if let (Some(id), Some(secret), Some(turl), Some(surl)) = (
             client_id.as_ref(),
@@ -6786,6 +6786,34 @@ mod tests {
     }
 
     #[test]
+    fn test_aws_stored_credentials_accept_alias_and_case_insensitive_entry() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut auth = AuthStorage {
+            path: dir.path().join("auth.json"),
+            entries: HashMap::new(),
+        };
+        auth.set(
+            "BedRock",
+            AuthCredential::AwsCredentials {
+                access_key_id: "AKIA_ALIAS".to_string(),
+                secret_access_key: "alias-secret".to_string(),
+                session_token: Some("alias-session".to_string()),
+                region: Some("eu-central-1".to_string()),
+            },
+        );
+        let result = resolve_aws_credentials_with_env(&auth, |_| -> Option<String> { None });
+        assert_eq!(
+            result,
+            Some(AwsResolvedCredentials::Sigv4 {
+                access_key_id: "AKIA_ALIAS".to_string(),
+                secret_access_key: "alias-secret".to_string(),
+                session_token: Some("alias-session".to_string()),
+                region: "eu-central-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn test_aws_stored_bearer_fallback() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let mut auth = AuthStorage {
@@ -6940,6 +6968,34 @@ mod tests {
                 client_secret: "stored-secret".to_string(),
                 token_url: "https://stored-token.sap.com".to_string(),
                 service_url: "https://stored-api.sap.com".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_sap_stored_service_key_accepts_alias_and_case_insensitive_entry() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut auth = AuthStorage {
+            path: dir.path().join("auth.json"),
+            entries: HashMap::new(),
+        };
+        auth.set(
+            "SaP",
+            AuthCredential::ServiceKey {
+                client_id: Some("alias-id".to_string()),
+                client_secret: Some("alias-secret".to_string()),
+                token_url: Some("https://alias-token.sap.com".to_string()),
+                service_url: Some("https://alias-api.sap.com".to_string()),
+            },
+        );
+        let result = resolve_sap_credentials_with_env(&auth, |_| -> Option<String> { None });
+        assert_eq!(
+            result,
+            Some(SapResolvedCredentials {
+                client_id: "alias-id".to_string(),
+                client_secret: "alias-secret".to_string(),
+                token_url: "https://alias-token.sap.com".to_string(),
+                service_url: "https://alias-api.sap.com".to_string(),
             })
         );
     }
