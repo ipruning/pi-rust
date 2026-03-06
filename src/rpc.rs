@@ -2085,7 +2085,7 @@ fn rpc_parse_extension_ui_response(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    if cancelled {
+    if cancelled && active.method != "custom" {
         return Ok(ExtensionUiResponse {
             id: active.id.clone(),
             value: None,
@@ -2164,7 +2164,7 @@ fn rpc_parse_extension_ui_response(
             })
         }
         "custom" => {
-            if let Some(value) = parsed.get("value") {
+            if let Some(value) = parsed.get("value").filter(|value| !value.is_null()) {
                 return Ok(ExtensionUiResponse {
                     id: active.id.clone(),
                     value: Some(value.clone()),
@@ -2323,6 +2323,24 @@ mod ui_bridge_tests {
         let val = json!({"requestId":"req-1","key":"q","width":120});
         let resp = rpc_parse_extension_ui_response(&val, &active).expect("custom key+width");
         assert_eq!(resp.value, Some(json!({"key":"q","width":120})));
+        assert!(!resp.cancelled);
+    }
+
+    #[test]
+    fn parse_custom_preserves_cancelled_and_width_as_payload() {
+        let active = ExtensionUiRequest::new("req-1", "custom", json!({}));
+        let val = json!({"requestId":"req-1","width":120,"cancelled":true});
+        let resp = rpc_parse_extension_ui_response(&val, &active).expect("custom cancelled+width");
+        assert_eq!(resp.value, Some(json!({"width":120,"closed":true})));
+        assert!(!resp.cancelled);
+    }
+
+    #[test]
+    fn parse_custom_treats_null_value_as_absent_for_close_payloads() {
+        let active = ExtensionUiRequest::new("req-1", "custom", json!({}));
+        let val = json!({"requestId":"req-1","value":null,"cancelled":true});
+        let resp = rpc_parse_extension_ui_response(&val, &active).expect("custom null+cancelled");
+        assert_eq!(resp.value, Some(json!({"closed":true})));
         assert!(!resp.cancelled);
     }
 

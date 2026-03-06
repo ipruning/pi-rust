@@ -4110,17 +4110,63 @@ pub fn migration_status(jsonl_path: &Path) -> MigrationState {
         }
     }
 
-    // Try to open and validate.
-    match SessionStoreV2::create(&v2_root, 64 * 1024 * 1024) {
-        Ok(store) => match store.validate_integrity() {
+    let inspector = match SessionStoreV2::open_for_inspection(&v2_root, 64 * 1024 * 1024) {
+        Ok(store) => store,
+        Err(e) => {
+            return MigrationState::Corrupt {
+                error: e.to_string(),
+            };
+        }
+    };
+
+    match inspector.read_index() {
+        Ok(_) => match inspector.validate_integrity() {
             Ok(()) => MigrationState::Migrated,
             Err(e) => MigrationState::Corrupt {
                 error: e.to_string(),
             },
         },
+        Err(e) if migration_status_can_rebuild_index(&e) => {
+            match SessionStoreV2::create(&v2_root, 64 * 1024 * 1024) {
+                Ok(store) => match verify_v2_against_jsonl(jsonl_path, &store) {
+                    Ok(verification)
+                        if verification.entry_count_match
+                            && verification.hash_chain_match
+                            && verification.index_consistent =>
+                    {
+                        MigrationState::Migrated
+                    }
+                    Ok(verification) => MigrationState::Corrupt {
+                        error: format!(
+                            "migration verification failed after index rebuild: count={} hash={} index={}",
+                            verification.entry_count_match,
+                            verification.hash_chain_match,
+                            verification.index_consistent,
+                        ),
+                    },
+                    Err(err) => MigrationState::Corrupt {
+                        error: err.to_string(),
+                    },
+                },
+                Err(err) => MigrationState::Corrupt {
+                    error: err.to_string(),
+                },
+            }
+        }
         Err(e) => MigrationState::Corrupt {
             error: e.to_string(),
         },
+    }
+}
+
+fn migration_status_can_rebuild_index(error: &Error) -> bool {
+    match error {
+        Error::Json(_) => true,
+        Error::Io(err) => matches!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData
+        ),
+        _ => false,
     }
 }
 

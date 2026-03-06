@@ -233,6 +233,26 @@ pub struct SessionStoreV2 {
 }
 
 impl SessionStoreV2 {
+    /// Open a store handle for read-only inspection without bootstrap recovery.
+    pub fn open_for_inspection(root: impl AsRef<Path>, max_segment_bytes: u64) -> Result<Self> {
+        if max_segment_bytes == 0 {
+            return Err(Error::validation("max_segment_bytes must be > 0"));
+        }
+
+        Ok(Self {
+            root: root.as_ref().to_path_buf(),
+            max_segment_bytes,
+            next_segment_seq: 1,
+            next_frame_seq: 1,
+            next_entry_seq: 1,
+            current_segment_bytes: 0,
+            chain_hash: GENESIS_CHAIN_HASH.to_string(),
+            total_bytes: 0,
+            last_entry_id: None,
+            last_crc32c: "00000000".to_string(),
+        })
+    }
+
     pub fn create(root: impl AsRef<Path>, max_segment_bytes: u64) -> Result<Self> {
         if max_segment_bytes == 0 {
             return Err(Error::validation("max_segment_bytes must be > 0"));
@@ -1026,29 +1046,19 @@ impl SessionStoreV2 {
             loop {
                 line.clear();
                 // Use bounded read to prevent OOM on corrupted files (e.g. missing newlines)
-                let bytes_read = match read_line_with_limit(
-                    &mut reader,
-                    &mut line,
-                    MAX_FRAME_READ_BYTES,
-                ) {
-                    Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                        // If line exceeds limit, we treat it as corruption and truncate.
-                        // However, we can't easily recover the offset without reading past the bad data.
-                        // For safety, we truncate at the start of this bad frame.
-                        tracing::warn!(
-                            segment = %seg_path.display(),
-                            line_number,
-                            error = %e,
-                            "SessionStoreV2 encountered oversized line during index rebuild; truncating segment and quarantining subsequent segments"
-                        );
-                        drop(reader);
-                        truncate_file_to(seg_path, byte_offset)?;
-                        quarantine_segment_tail(&segment_files[i + 1..])?;
-                        break 'segments;
-                    }
-                    Err(e) => return Err(Error::Io(Box::new(e))),
-                };
+                let bytes_read =
+                    match read_line_with_limit(&mut reader, &mut line, MAX_FRAME_READ_BYTES) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                            return Err(Error::session(format!(
+                                "failed to read segment frame while rebuilding index: \
+                             segment={} line={}: {e}",
+                                seg_path.display(),
+                                line_number.saturating_add(1),
+                            )));
+                        }
+                        Err(e) => return Err(Error::Io(Box::new(e))),
+                    };
 
                 if bytes_read == 0 {
                     break;
@@ -1082,6 +1092,13 @@ impl SessionStoreV2 {
                     }
                     Err(err) => {
                         let at_eof = reader.fill_buf().is_ok_and(<[u8]>::is_empty);
+                        if !at_eof {
+                            return Err(Error::session(format!(
+                                "failed to parse segment frame while rebuilding index: \
+                                 segment={} line={line_number}: {err}",
+                                seg_path.display()
+                            )));
+                        }
                         tracing::warn!(
                             segment = %seg_path.display(),
                             line_number,
@@ -1282,7 +1299,15 @@ impl SessionStoreV2 {
                 .ok_or_else(|| Error::session("frame sequence overflow while bootstrapping"))?;
             let segment_path = self.segment_file_path(last.segment_seq);
             let expected_segment_bytes = last.byte_offset.saturating_add(last.byte_length);
-            let actual_segment_bytes = fs::metadata(&segment_path).map_or(0, |meta| meta.len());
+            let actual_segment_bytes =
+                fs::metadata(&segment_path)
+                    .map(|meta| meta.len())
+                    .map_err(|err| {
+                        Error::session(format!(
+                            "failed to stat active segment {} while bootstrapping: {err}",
+                            segment_path.display()
+                        ))
+                    })?;
 
             if actual_segment_bytes > expected_segment_bytes {
                 tracing::warn!(
