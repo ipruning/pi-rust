@@ -72,8 +72,8 @@ fn assert_contains_entry<'a>(
 }
 
 #[test]
-fn dropin143_session_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin143_session_surface_logs_include_requirement_id");
+fn dropin174_session_surface_logs_include_requirement_id() {
+    let harness = TestHarness::new("dropin174_session_surface_logs_include_requirement_id");
     harness
         .log()
         .info_ctx("dropin174.session", "Session parity assertion", |ctx| {
@@ -266,9 +266,9 @@ proptest! {
             parent_session: None,
         };
         session.entries = decoded_entries;
-        session._test_set_leaf_id(leaf_id);
+        session.leaf_id = leaf_id;
 
-        if let Some(leaf_id) = session.leaf_id().map(String::from) {
+        if let Some(leaf_id) = session.leaf_id.clone() {
             // Path should always end at the requested entry.
             let path = session.get_path_to_entry(&leaf_id);
             prop_assert_eq!(path.last().map(String::as_str), Some(leaf_id.as_str()));
@@ -312,7 +312,7 @@ fn load_session_accepts_parent_session_alias_and_fills_ids() {
                 .all(|entry| entry.base().id.as_ref().is_some())
         );
 
-        let leaf = session.leaf_id();
+        let leaf = session.leaf_id.as_deref();
         let last_id = session
             .entries
             .last()
@@ -381,7 +381,7 @@ fn open_header_only_session_succeeds_with_no_entries() {
 
         let loaded = open_session(&path).await.expect("open header-only session");
         assert!(loaded.entries.is_empty());
-        assert!(loaded.leaf_id().is_none());
+        assert!(loaded.leaf_id.is_none());
     });
 }
 
@@ -438,7 +438,7 @@ fn plan_fork_from_user_message_branches_from_parent_and_returns_selected_text() 
     } = plan;
     let mut forked = Session::create();
     forked.entries = entries;
-    forked._test_set_leaf_id(leaf_id);
+    forked.leaf_id = leaf_id;
 
     let appended = forked.append_message(make_user_message("Followup"));
     let appended_entry = forked.get_entry(&appended).expect("appended entry");
@@ -487,21 +487,11 @@ fn save_updates_session_index_for_override_dir() {
         session.save().await.expect("save session");
 
         let index = SessionIndex::for_sessions_root(&base_dir);
-        // The index update runs on a background dispatcher thread. Under heavy
-        // parallel-test load the 250 ms internal flush timeout inside
-        // `list_sessions` may not suffice, so retry a few times.
-        let mut indexed = false;
-        for _ in 0..5 {
-            indexed = index
-                .list_sessions(Some(&session.header.cwd))
-                .expect("list sessions")
-                .into_iter()
-                .any(|meta| meta.id == session.header.id);
-            if indexed {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        let indexed = index
+            .list_sessions(Some(&session.header.cwd))
+            .expect("list sessions")
+            .into_iter()
+            .any(|meta| meta.id == session.header.id);
 
         harness.assert_log("Session saved and indexed");
         assert!(indexed, "Expected session to be indexed after save()");
@@ -522,7 +512,7 @@ fn save_and_open_round_trip_linear_messages_preserves_leaf_id() {
         let loaded = save_and_reopen(&harness, &mut session).await;
 
         assert_eq!(loaded.entries.len(), 2);
-        assert_eq!(loaded.leaf_id(), Some(id2.as_str()));
+        assert_eq!(loaded.leaf_id.as_deref(), Some(id2.as_str()));
 
         let path = loaded.get_path_to_entry(&id2);
         assert_eq!(path, vec![id1, id2]);
@@ -755,13 +745,13 @@ fn save_round_trips_custom_entry() {
         session.append_message(make_user_message("Hello"));
 
         let custom_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let base = EntryBase::new(session.leaf_id().map(String::from), custom_id.clone());
+        let base = EntryBase::new(session.leaf_id.clone(), custom_id.clone());
         session.entries.push(SessionEntry::Custom(CustomEntry {
             base,
             custom_type: "note".to_string(),
             data: Some(json!({"tag":"demo"})),
         }));
-        session._test_set_leaf_id(Some(custom_id.clone()));
+        session.leaf_id = Some(custom_id.clone());
 
         let loaded = save_and_reopen(&harness, &mut session).await;
         assert_contains_entry(
@@ -1135,50 +1125,4 @@ fn save_preserves_message_timestamps() {
             panic!("Expected Message entry");
         }
     });
-}
-
-#[test]
-fn dropin174_session_surface_logs_include_requirement_id() {
-    let harness = TestHarness::new("dropin174_session_surface_logs_include_requirement_id");
-    harness
-        .log()
-        .info_ctx("parity", "DROPIN-174 session parity trace", |ctx| {
-            ctx.push(("requirement_id".to_string(), "DROPIN-143".to_string()));
-            ctx.push(("surface".to_string(), "session".to_string()));
-            ctx.push((
-                "parity_requirement".to_string(),
-                "Session/branch/compaction behavior parity".to_string(),
-            ));
-        });
-
-    let jsonl = harness.dump_logs();
-    let errors = validate_jsonl(&jsonl);
-    assert!(
-        errors.is_empty(),
-        "harness log JSONL must validate: {errors:?}"
-    );
-
-    let matched = jsonl
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid json log line"))
-        .filter(|value| value.get("category").and_then(serde_json::Value::as_str) == Some("parity"))
-        .any(|value| {
-            let Some(ctx) = value.get("context").and_then(serde_json::Value::as_object) else {
-                return false;
-            };
-            ctx.get("requirement_id")
-                .and_then(serde_json::Value::as_str)
-                == Some("DROPIN-143")
-                && ctx.get("surface").and_then(serde_json::Value::as_str) == Some("session")
-                && ctx
-                    .get("parity_requirement")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("Session/branch/compaction behavior parity")
-        });
-
-    assert!(
-        matched,
-        "expected a parity log line with DROPIN-143 session requirement context"
-    );
 }
