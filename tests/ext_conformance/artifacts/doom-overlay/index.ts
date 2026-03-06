@@ -30,7 +30,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Auto-download WAD if not present
 			ctx.ui.notify("Loading DOOM...", "info");
-			const wad = args?.trim() ? args.trim() : await ensureWadFile();
+			const wad = args?.trim()
+				? args.trim()
+				: await ensureWadFile((message) => ctx.ui.notify(message, "info"));
 
 			if (!wad) {
 				ctx.ui.notify("Failed to download DOOM WAD file. Check your internet connection.", "error");
