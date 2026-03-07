@@ -20934,7 +20934,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
 
             runtime
                 .eval(
-                    r#"
+                    r"
                     const bytes = pi.crypto.randomBytes(128);
                     const blocks = [];
                     for (let i = 0; i < bytes.length; i += 16) {
@@ -20946,7 +20946,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                     globalThis.randomBytesLookLikeUuidBlocks = blocks.every(
                         (block) => block.versionNibble === 4 && block.variantBits === 2,
                     );
-                    "#,
+                    ",
                 )
                 .await
                 .expect("eval random bytes pattern");
