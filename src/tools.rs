@@ -3759,6 +3759,12 @@ impl Tool for FindTool {
         let input: FindInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
 
+        if matches!(input.limit, Some(0)) {
+            return Err(Error::validation(
+                "`limit` must be greater than 0".to_string(),
+            ));
+        }
+
         let search_dir = input.path.as_deref().unwrap_or(".");
         let search_path = strip_unc_prefix(resolve_read_path(search_dir, &self.cwd));
         let effective_limit = input.limit.unwrap_or(DEFAULT_FIND_LIMIT);
@@ -4058,6 +4064,12 @@ impl Tool for LsTool {
     ) -> Result<ToolOutput> {
         let input: LsInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
+
+        if matches!(input.limit, Some(0)) {
+            return Err(Error::validation(
+                "`limit` must be greater than 0".to_string(),
+            ));
+        }
 
         let dir_path = input
             .path
@@ -6939,6 +6951,36 @@ mod tests {
     }
 
     #[test]
+    fn test_find_zero_limit_is_rejected() {
+        asupersync::test_utils::run_test(|| async {
+            if find_fd_binary().is_none() {
+                return;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("file.txt"), "").unwrap();
+
+            let tool = FindTool::new(tmp.path());
+            let err = tool
+                .execute(
+                    "t",
+                    serde_json::json!({
+                        "pattern": "*.txt",
+                        "path": tmp.path().to_string_lossy(),
+                        "limit": 0
+                    }),
+                    None,
+                )
+                .await
+                .expect_err("limit=0 should be rejected");
+
+            assert!(
+                err.to_string().contains("`limit` must be greater than 0"),
+                "expected validation error, got: {err}"
+            );
+        });
+    }
+
+    #[test]
     fn test_find_no_matches() {
         asupersync::test_utils::run_test(|| async {
             if find_fd_binary().is_none() {
@@ -7171,6 +7213,32 @@ mod tests {
                     .get("entryLimitReached")
                     .and_then(serde_json::Value::as_u64),
                 Some(5)
+            );
+        });
+    }
+
+    #[test]
+    fn test_ls_zero_limit_is_rejected() {
+        asupersync::test_utils::run_test(|| async {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("item.txt"), "").unwrap();
+
+            let tool = LsTool::new(tmp.path());
+            let err = tool
+                .execute(
+                    "t",
+                    serde_json::json!({
+                        "path": tmp.path().to_string_lossy(),
+                        "limit": 0
+                    }),
+                    None,
+                )
+                .await
+                .expect_err("limit=0 should be rejected");
+
+            assert!(
+                err.to_string().contains("`limit` must be greater than 0"),
+                "expected validation error, got: {err}"
             );
         });
     }
