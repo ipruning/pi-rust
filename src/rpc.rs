@@ -199,7 +199,7 @@ impl RpcSharedState {
     }
 
     fn push_steering(&mut self, message: Message) -> Result<()> {
-        if self.steering.len() >= MAX_RPC_PENDING_MESSAGES {
+        if self.pending_count() >= MAX_RPC_PENDING_MESSAGES {
             return Err(Error::session(
                 "Steering queue is full (Do you have too many pending commands?)",
             ));
@@ -209,7 +209,7 @@ impl RpcSharedState {
     }
 
     fn push_follow_up(&mut self, message: Message) -> Result<()> {
-        if self.follow_up.len() >= MAX_RPC_PENDING_MESSAGES {
+        if self.pending_count() >= MAX_RPC_PENDING_MESSAGES {
             return Err(Error::session("Follow-up queue is full"));
         }
         self.follow_up.push_back(message);
@@ -4484,6 +4484,42 @@ mod tests {
             auto_retry_enabled: false,
         };
         assert_eq!(snapshot.pending_count(), 0);
+    }
+
+    #[test]
+    fn shared_state_blocks_follow_up_when_steering_queue_reaches_total_cap() {
+        let config = Config::default();
+        let mut shared = RpcSharedState::new(&config);
+
+        for idx in 0..MAX_RPC_PENDING_MESSAGES {
+            shared
+                .push_steering(build_user_message(&format!("steer-{idx}"), &[]))
+                .expect("steering enqueue within total cap");
+        }
+
+        let err = shared
+            .push_follow_up(build_user_message("follow-up-overflow", &[]))
+            .expect_err("follow-up enqueue should respect total pending cap");
+        assert!(matches!(err, Error::Session(_)));
+        assert_eq!(shared.pending_count(), MAX_RPC_PENDING_MESSAGES);
+    }
+
+    #[test]
+    fn shared_state_blocks_steering_when_follow_up_queue_reaches_total_cap() {
+        let config = Config::default();
+        let mut shared = RpcSharedState::new(&config);
+
+        for idx in 0..MAX_RPC_PENDING_MESSAGES {
+            shared
+                .push_follow_up(build_user_message(&format!("follow-up-{idx}"), &[]))
+                .expect("follow-up enqueue within total cap");
+        }
+
+        let err = shared
+            .push_steering(build_user_message("steer-overflow", &[]))
+            .expect_err("steering enqueue should respect total pending cap");
+        assert!(matches!(err, Error::Session(_)));
+        assert_eq!(shared.pending_count(), MAX_RPC_PENDING_MESSAGES);
     }
 
     // -----------------------------------------------------------------------
