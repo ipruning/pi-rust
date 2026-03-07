@@ -482,7 +482,7 @@ impl ModelRegistry {
                     .and_then(|s| serde_json::from_str::<ModelsConfig>(&s).map_err(Error::from))
                 {
                     Ok(config) => {
-                        apply_custom_models(auth, &mut models, &config);
+                        apply_custom_models(auth, &mut models, &config, path.parent());
                     }
                     Err(e) => {
                         error = Some(format!("{e}\n\nFile: {}", path.display()));
@@ -1250,7 +1250,12 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
 }
 
 #[allow(clippy::too_many_lines)]
-fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config: &ModelsConfig) {
+fn apply_custom_models(
+    auth: &AuthStorage,
+    models: &mut Vec<ModelEntry>,
+    config: &ModelsConfig,
+    base_dir: Option<&Path>,
+) {
     for (provider_id, provider_cfg) in &config.providers {
         let provider_id_str = provider_id.as_str();
         let routing_defaults = provider_routing_defaults(provider_id);
@@ -1267,7 +1272,7 @@ fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config:
             )
         });
 
-        let provider_headers = resolve_headers(provider_cfg.headers.as_ref());
+        let provider_headers = resolve_headers_with_base(provider_cfg.headers.as_ref(), base_dir);
         let canonical_provider = canonical_provider_id(provider_id).unwrap_or(provider_id_str);
         let provider_matches = |candidate_provider: &str| {
             let candidate_canonical =
@@ -1280,7 +1285,7 @@ fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config:
         let provider_key = provider_cfg
             .api_key
             .as_deref()
-            .and_then(resolve_value)
+            .and_then(|value| resolve_value_with_base(value, base_dir))
             .or_else(|| auth.resolve_api_key(canonical_provider, None));
 
         let auth_header = provider_cfg
@@ -1364,7 +1369,7 @@ fn apply_custom_models(auth: &AuthStorage, models: &mut Vec<ModelEntry>, config:
                 .unwrap_or_else(|_| Api::Custom(model_api.to_string()));
             let model_headers = merge_headers(
                 &provider_headers,
-                resolve_headers(model_cfg.headers.as_ref()),
+                resolve_headers_with_base(model_cfg.headers.as_ref(), base_dir),
             );
             let default_input_types = routing_defaults
                 .map_or_else(|| vec![InputType::Text], |defaults| defaults.input.to_vec());
@@ -1503,10 +1508,17 @@ fn merge_headers(
 }
 
 fn resolve_headers(headers: Option<&HashMap<String, String>>) -> HashMap<String, String> {
+    resolve_headers_with_base(headers, None)
+}
+
+fn resolve_headers_with_base(
+    headers: Option<&HashMap<String, String>>,
+    base_dir: Option<&Path>,
+) -> HashMap<String, String> {
     let mut resolved = HashMap::new();
     if let Some(headers) = headers {
         for (k, v) in headers {
-            if let Some(val) = resolve_value(v) {
+            if let Some(val) = resolve_value_with_base(v, base_dir) {
                 resolved.insert(k.clone(), val);
             }
         }
@@ -1515,6 +1527,10 @@ fn resolve_headers(headers: Option<&HashMap<String, String>>) -> HashMap<String,
 }
 
 fn resolve_value(value: &str) -> Option<String> {
+    resolve_value_with_base(value, None)
+}
+
+fn resolve_value_with_base(value: &str, base_dir: Option<&Path>) -> Option<String> {
     if let Some(rest) = value.strip_prefix('!') {
         return resolve_shell(rest);
     }
@@ -1530,7 +1546,15 @@ fn resolve_value(value: &str) -> Option<String> {
         if file_path.is_empty() {
             return None;
         }
-        return std::fs::read_to_string(file_path)
+        let path = Path::new(file_path);
+        let resolved_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(base_dir) = base_dir {
+            base_dir.join(path)
+        } else {
+            path.to_path_buf()
+        };
+        return std::fs::read_to_string(resolved_path)
             .ok()
             .map(|contents| contents.trim().to_string())
             .filter(|v| !v.is_empty());
@@ -2031,7 +2055,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         for entry in models.iter().filter(|m| m.model.provider == "anthropic") {
             assert_eq!(entry.model.base_url, "https://proxy.example/v1/messages");
@@ -2069,7 +2093,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let cohere = models
             .iter()
@@ -2125,7 +2149,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let entry = models
             .iter()
@@ -2174,7 +2198,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let anthropic = models
             .iter()
@@ -2219,7 +2243,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let kimi = models
             .iter()
@@ -2394,7 +2418,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let openrouter_models: Vec<&ModelEntry> = models
             .iter()
@@ -3246,7 +3270,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         // Built-in anthropic models should be replaced
         let anthropic_after: Vec<_> = models
@@ -3281,7 +3305,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         assert!(
             !models.iter().any(|m| m.model.provider == "google"),
@@ -3317,7 +3341,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
 
         let google_after: Vec<_> = models
             .iter()
@@ -3354,7 +3378,7 @@ mod tests {
             )]),
         };
 
-        apply_custom_models(&auth, &mut models, &config);
+        apply_custom_models(&auth, &mut models, &config, None);
         let registry = ModelRegistry {
             models,
             error: None,
