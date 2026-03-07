@@ -15,9 +15,9 @@ use crate::auth::AuthStorage;
 use crate::cli;
 use crate::config::Config;
 use crate::model::{self, AssistantMessage, ContentBlock, ImageContent, TextContent};
-use crate::models::{ModelEntry, ModelRegistry, default_models_path};
+use crate::models::{ModelEntry, ModelRegistry, default_models_path, model_entry_is_ready, model_requires_configured_credential};
 use crate::provider::{StreamOptions, ThinkingBudgets};
-use crate::provider_metadata::{canonical_provider_id, provider_metadata};
+use crate::provider_metadata::{canonical_provider_id, provider_ids_match, split_provider_model_spec};
 use crate::session::Session;
 use crate::tools::process_file_arguments;
 
@@ -754,21 +754,6 @@ fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
     })
 }
 
-fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
-    let provider = entry.model.provider.as_str();
-    entry.auth_header
-        || provider_metadata(provider).is_some_and(|meta| !meta.auth_env_keys.is_empty())
-        || entry.oauth_config.is_some()
-}
-
-fn model_entry_is_ready(entry: &ModelEntry) -> bool {
-    !model_requires_configured_credential(entry)
-        || entry
-            .api_key
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
 pub fn resolve_api_key(
     auth: &AuthStorage,
     cli: &cli::Cli,
@@ -958,31 +943,6 @@ fn parse_model_pattern(pattern: &str, available_models: &[ModelEntry]) -> Parsed
     }
 
     result
-}
-
-fn split_provider_model_spec(model_spec: &str) -> Option<(&str, &str)> {
-    let (provider, model_id) = model_spec.split_once('/')?;
-    let provider = provider.trim();
-    let model_id = model_id.trim();
-    if provider.is_empty() || model_id.is_empty() {
-        return None;
-    }
-    Some((provider, model_id))
-}
-
-fn provider_ids_match(left: &str, right: &str) -> bool {
-    let left = left.trim();
-    let right = right.trim();
-    if left.eq_ignore_ascii_case(right) {
-        return true;
-    }
-
-    let left_canonical = canonical_provider_id(left).unwrap_or(left);
-    let right_canonical = canonical_provider_id(right).unwrap_or(right);
-
-    left_canonical.eq_ignore_ascii_case(right)
-        || right_canonical.eq_ignore_ascii_case(left)
-        || left_canonical.eq_ignore_ascii_case(right_canonical)
 }
 
 fn try_match_model(pattern: &str, available_models: &[ModelEntry]) -> Option<ModelEntry> {

@@ -1,6 +1,7 @@
 use super::*;
 
-use crate::models::ModelEntry;
+use crate::models::{ModelEntry, model_requires_configured_credential};
+use crate::provider_metadata::{provider_ids_match, split_provider_model_spec};
 
 #[cfg(feature = "clipboard")]
 use arboard::Clipboard as ArboardClipboard;
@@ -454,14 +455,6 @@ pub(super) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
     })
 }
 
-pub(super) fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
-    let provider = entry.model.provider.as_str();
-    entry.auth_header
-        || crate::provider_metadata::provider_metadata(provider)
-            .is_some_and(|meta| !meta.auth_env_keys.is_empty())
-        || entry.oauth_config.is_some()
-}
-
 pub(super) fn resolve_model_key_with_auth(
     auth: &crate::auth::AuthStorage,
     entry: &ModelEntry,
@@ -476,20 +469,6 @@ pub(super) fn resolve_model_key_from_default_auth(entry: &ModelEntry) -> Option<
         .ok()
         .and_then(|auth| resolve_model_key_with_auth(&auth, entry))
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
-}
-
-fn provider_ids_match(left: &str, right: &str) -> bool {
-    normalize_auth_provider_input(left) == normalize_auth_provider_input(right)
-}
-
-fn split_provider_model_spec(model_spec: &str) -> Option<(&str, &str)> {
-    let (provider, model_id) = model_spec.split_once('/')?;
-    let provider = provider.trim();
-    let model_id = model_id.trim();
-    if provider.is_empty() || model_id.is_empty() {
-        return None;
-    }
-    Some((provider, model_id))
 }
 
 pub fn resolve_scoped_model_entries(

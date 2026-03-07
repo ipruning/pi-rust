@@ -443,7 +443,7 @@ impl PiApp {
             }
         };
         let resolved_key_opt = super::commands::resolve_model_key_from_default_auth(&next);
-        if super::commands::model_requires_configured_credential(&next)
+        if crate::models::model_requires_configured_credential(&next)
             && resolved_key_opt.is_none()
         {
             self.status_message = Some(format!(

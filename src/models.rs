@@ -436,7 +436,7 @@ pub fn model_catalog_cache_fingerprint() -> u64 {
     })
 }
 
-fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
+pub(crate) fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
     let provider = entry.model.provider.as_str();
     entry.auth_header
         || crate::provider_metadata::provider_metadata(provider)
@@ -444,7 +444,7 @@ fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
         || entry.oauth_config.is_some()
 }
 
-fn model_entry_is_ready(entry: &ModelEntry) -> bool {
+pub(crate) fn model_entry_is_ready(entry: &ModelEntry) -> bool {
     !model_requires_configured_credential(entry)
         || entry
             .api_key

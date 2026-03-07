@@ -24,8 +24,8 @@ use crate::extensions::{ExtensionManager, ExtensionUiRequest, ExtensionUiRespons
 use crate::model::{
     ContentBlock, ImageContent, Message, StopReason, TextContent, UserContent, UserMessage,
 };
-use crate::models::ModelEntry;
-use crate::provider_metadata::{canonical_provider_id, provider_metadata};
+use crate::models::{ModelEntry, model_requires_configured_credential};
+use crate::provider_metadata::provider_ids_match;
 use crate::providers;
 use crate::resources::ResourceLoader;
 use crate::session::SessionMessage;
@@ -42,21 +42,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-
-fn provider_ids_match(left: &str, right: &str) -> bool {
-    let left = left.trim();
-    let right = right.trim();
-    if left.eq_ignore_ascii_case(right) {
-        return true;
-    }
-
-    let left_canonical = canonical_provider_id(left).unwrap_or(left);
-    let right_canonical = canonical_provider_id(right).unwrap_or(right);
-
-    left_canonical.eq_ignore_ascii_case(right)
-        || right_canonical.eq_ignore_ascii_case(left)
-        || left_canonical.eq_ignore_ascii_case(right_canonical)
-}
 
 #[derive(Clone)]
 pub struct RpcOptions {
@@ -3746,13 +3731,6 @@ fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
         let trimmed = key.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
-}
-
-fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
-    let provider = entry.model.provider.as_str();
-    entry.auth_header
-        || provider_metadata(provider).is_some_and(|meta| !meta.auth_env_keys.is_empty())
-        || entry.oauth_config.is_some()
 }
 
 fn parse_thinking_level(level: &str) -> Result<crate::model::ThinkingLevel> {

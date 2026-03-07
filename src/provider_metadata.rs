@@ -1578,6 +1578,36 @@ pub fn provider_routing_defaults(provider_id: &str) -> Option<ProviderRoutingDef
     provider_metadata(provider_id).and_then(|meta| meta.routing_defaults)
 }
 
+/// Compare two provider IDs for equality, resolving aliases via
+/// [`canonical_provider_id`].
+pub fn provider_ids_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+
+    let left_canonical = canonical_provider_id(left).unwrap_or(left);
+    let right_canonical = canonical_provider_id(right).unwrap_or(right);
+
+    left_canonical.eq_ignore_ascii_case(right)
+        || right_canonical.eq_ignore_ascii_case(left)
+        || left_canonical.eq_ignore_ascii_case(right_canonical)
+}
+
+/// Split a `"provider/model"` spec into `(provider, model_id)`.
+///
+/// Handles nested model paths such as `"openrouter/anthropic/claude-sonnet-4.5"`.
+pub fn split_provider_model_spec(model_spec: &str) -> Option<(&str, &str)> {
+    let (provider, model_id) = model_spec.split_once('/')?;
+    let provider = provider.trim();
+    let model_id = model_id.trim();
+    if provider.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some((provider, model_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

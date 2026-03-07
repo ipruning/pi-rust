@@ -1,6 +1,5 @@
-use super::commands::{
-    model_entry_matches, model_requires_configured_credential, resolve_model_key_from_default_auth,
-};
+use super::commands::{model_entry_matches, resolve_model_key_from_default_auth};
+use crate::models::model_requires_configured_credential;
 use super::*;
 
 impl PiApp {
