@@ -14,9 +14,10 @@ use sha2::Digest as _;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tempfile::NamedTempFile;
 
 fn finish_auth_task<T, E>(
     handle: std::thread::JoinHandle<()>,
@@ -221,11 +222,10 @@ impl AuthStorage {
     /// Load auth.json (creates empty if missing).
     pub fn load(path: PathBuf) -> Result<Self> {
         let entries = if path.exists() {
-            let file = File::open(&path).map_err(|e| Error::auth(format!("auth.json: {e}")))?;
-            let mut locked = lock_file_shared(file, Duration::from_secs(30))?;
-            // Read from the locked file handle, not a new handle
-            let mut content = String::new();
-            locked.as_file_mut().read_to_string(&mut content)?;
+            let lock_handle = open_auth_lock_file(&path)?;
+            let _locked = lock_file_shared(lock_handle, Duration::from_secs(30))?;
+            let content =
+                fs::read_to_string(&path).map_err(|e| Error::auth(format!("auth.json: {e}")))?;
             let parsed: AuthFile = match serde_json::from_str(&content) {
                 Ok(file) => file,
                 Err(e) => {
@@ -290,42 +290,35 @@ impl AuthStorage {
     }
 
     fn save_data_sync(path: &Path, data: &str) -> Result<()> {
+        Self::save_data_sync_with_hook(path, data, |_| Ok(()))
+    }
+
+    fn save_data_sync_with_hook<F>(path: &Path, data: &str, before_persist: F) -> Result<()>
+    where
+        F: FnOnce(&NamedTempFile) -> std::io::Result<()>,
+    {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let mut options = File::options();
-        options.read(true).write(true).create(true).truncate(false);
+        let lock_handle = open_auth_lock_file(path)?;
+        let _locked = lock_file(lock_handle, Duration::from_secs(30))?;
+
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = NamedTempFile::new_in(parent)?;
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            use std::os::unix::fs::PermissionsExt as _;
+            temp.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
         }
 
-        let file = options.open(path)?;
-        let mut locked = lock_file(file, Duration::from_secs(30))?;
-
-        // Write to the locked file handle, not a new handle
-        let f = locked.as_file_mut();
-        let old_len = f.metadata()?.len();
-        f.seek(SeekFrom::Start(0))?;
-
-        let data_bytes = data.as_bytes();
-        f.write_all(data_bytes)?;
-
-        let new_len = data_bytes.len() as u64;
-        if new_len < old_len {
-            // Pad with spaces to overwrite any trailing JSON structure that might cause
-            // parsing errors if we crash before set_len. Trailing whitespace is ignored by JSON.
-            let spaces = vec![b' '; usize::try_from(old_len - new_len).unwrap_or(0)];
-            f.write_all(&spaces)?;
-            // Truncate back to the correct logical length
-            f.set_len(new_len)?;
-        }
-
-        f.flush()?;
-        f.sync_data()?;
+        temp.write_all(data.as_bytes())?;
+        temp.as_file().sync_all()?;
+        before_persist(&temp)?;
+        temp.persist(path).map_err(|err| err.error)?;
+        sync_parent_dir(path)?;
 
         Ok(())
     }
@@ -2009,6 +2002,48 @@ fn kimi_common_headers() -> Vec<(String, String)> {
             sanitize_ascii_header_value(&kimi_device_id(), "unknown"),
         ),
     ]
+}
+
+fn auth_lock_path(path: &Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map_or_else(|| "lock".to_string(), |ext| format!("{ext}.lock"));
+    path.with_extension(extension)
+}
+
+fn open_auth_lock_file(path: &Path) -> Result<File> {
+    let lock_path = auth_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut options = File::options();
+    options.read(true).write(true).create(true).truncate(false);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    options
+        .open(lock_path)
+        .map_err(|err| Error::auth(format!("auth lock file: {err}")))
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Start Anthropic OAuth by generating an authorization URL and PKCE verifier.
@@ -5373,6 +5408,62 @@ mod tests {
         let metadata = fs::metadata(&auth_path).expect("metadata");
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "auth.json should be owner-only read/write");
+    }
+
+    #[test]
+    fn test_save_uses_lockfile_and_preserves_original_on_persist_failure() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let auth_path = dir.path().join("auth.json");
+
+        let mut original = AuthStorage {
+            path: auth_path.clone(),
+            entries: HashMap::new(),
+        };
+        original.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "old-key".to_string(),
+            },
+        );
+        original.save().expect("save original auth");
+
+        let lock_path = auth_lock_path(&auth_path);
+        assert!(
+            lock_path.exists(),
+            "expected sibling lockfile to be created"
+        );
+
+        let mut replacement_entries = HashMap::new();
+        replacement_entries.insert(
+            "anthropic".to_string(),
+            AuthCredential::ApiKey {
+                key: "new-key".to_string(),
+            },
+        );
+        let replacement_data = serde_json::to_string_pretty(&AuthFileRef {
+            entries: &replacement_entries,
+        })
+        .expect("serialize replacement");
+
+        let mut temp_path = None;
+        let err = AuthStorage::save_data_sync_with_hook(&auth_path, &replacement_data, |temp| {
+            temp_path = Some(temp.path().to_path_buf());
+            Err(std::io::Error::other("injected persist failure"))
+        })
+        .expect_err("persist hook should abort save");
+        assert!(
+            err.to_string().contains("injected persist failure"),
+            "unexpected error: {err}"
+        );
+
+        let temp_path = temp_path.expect("captured temp path");
+        assert!(
+            !temp_path.exists(),
+            "temporary auth file should be cleaned up on failure"
+        );
+
+        let reloaded = AuthStorage::load(auth_path).expect("reload auth");
+        assert_eq!(reloaded.api_key("anthropic").as_deref(), Some("old-key"));
     }
 
     // ── Missing key handling ──────────────────────────────────────────
