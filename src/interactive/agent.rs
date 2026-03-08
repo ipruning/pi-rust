@@ -1082,6 +1082,7 @@ impl PiApp {
             let cmd = match next {
                 PendingInput::Text(text) => self.submit_message(&text),
                 PendingInput::Content(content) => self.submit_content(content),
+                PendingInput::Continue => self.submit_continue(),
             };
 
             if cmd.is_some() {
@@ -1172,6 +1173,105 @@ impl PiApp {
         if let Some(handle) = &self.abort_handle {
             handle.abort();
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn submit_continue(&mut self) -> Option<Cmd> {
+        let event_tx = self.event_tx.clone();
+        let agent = Arc::clone(&self.agent);
+        let session = Arc::clone(&self.session);
+        let save_enabled = self.save_enabled;
+        let extensions = self.extensions.clone();
+        let runtime_handle = self.runtime_handle.clone();
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        self.abort_handle = Some(abort_handle);
+
+        self.agent_state = AgentState::Processing;
+        self.scroll_to_bottom();
+
+        let runtime_handle_for_task = runtime_handle.clone();
+        runtime_handle.spawn(async move {
+            if let Some(manager) = extensions.clone() {
+                let _ = manager
+                    .dispatch_event(ExtensionEventName::BeforeAgentStart, None)
+                    .await;
+            }
+
+            let cx = Cx::for_request();
+            let mut agent_guard =
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &cx).await {
+                    Ok(guard) => guard,
+                    Err(err) => {
+                        let _ = event_tx
+                            .try_send(PiMsg::AgentError(format!("Failed to lock agent: {err}")));
+                        return;
+                    }
+                };
+            let previous_len = agent_guard.messages().len();
+
+            let event_sender = event_tx.clone();
+            let extensions = extensions.clone();
+            let runtime_handle = runtime_handle_for_task.clone();
+            let coalescer = extensions
+                .as_ref()
+                .map(|m| crate::extensions::EventCoalescer::new(m.clone()));
+            let ui_stream_batcher = Arc::new(StdMutex::new(UiStreamDeltaBatcher::new(
+                event_sender.clone(),
+            )));
+            let ui_stream_batcher_for_events = Arc::clone(&ui_stream_batcher);
+            let result = agent_guard
+                .run_continue_with_abort(Some(abort_signal), move |event| {
+                    {
+                        let mut batcher = match ui_stream_batcher_for_events.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        dispatch_agent_event_to_ui(&event, &mut batcher);
+                    }
+
+                    if let Some(coal) = &coalescer {
+                        coal.dispatch_agent_event_lazy(&event, &runtime_handle);
+                    }
+                })
+                .await;
+            flush_ui_stream_batcher_with_backpressure(&ui_stream_batcher).await;
+
+            let new_messages: Vec<crate::model::Message> =
+                agent_guard.messages()[previous_len..].to_vec();
+            drop(agent_guard);
+
+            let mut session_guard =
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
+                    Ok(guard) => guard,
+                    Err(err) => {
+                        let _ = event_tx
+                            .try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
+                        return;
+                    }
+                };
+            for message in new_messages {
+                session_guard.append_model_message(message);
+            }
+            let mut save_error = None;
+
+            if save_enabled {
+                if let Err(err) = session_guard.save().await {
+                    save_error = Some(format!("Failed to save session: {err}"));
+                }
+            }
+            drop(session_guard);
+
+            if let Some(err) = save_error {
+                let _ = event_tx.try_send(PiMsg::AgentError(err));
+            }
+
+            if let Err(err) = result {
+                let formatted = crate::error_hints::format_error_with_hints(&err);
+                let _ = event_tx.try_send(PiMsg::AgentError(formatted));
+            }
+        });
+
+        None
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1587,7 +1687,7 @@ mod stream_delta_batcher_tests {
     use crate::agent::{Agent, AgentConfig};
     use crate::config::Config;
     use crate::keybindings::KeyBindings;
-    use crate::model::{StreamEvent, Usage};
+    use crate::model::{AssistantMessage, StreamEvent, Usage};
     use crate::provider::{Context, InputType, Model, ModelCost, Provider, StreamOptions};
     use crate::resources::{ResourceCliOptions, ResourceLoader};
     use crate::session::Session;
@@ -1600,6 +1700,7 @@ mod stream_delta_batcher_tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::OnceLock;
+    use std::sync::atomic::AtomicUsize;
 
     struct DummyProvider;
 
@@ -1628,7 +1729,7 @@ mod stream_delta_batcher_tests {
         }
     }
 
-    fn runtime_handle() -> asupersync::runtime::RuntimeHandle {
+    fn runtime() -> &'static asupersync::runtime::Runtime {
         static RT: OnceLock<asupersync::runtime::Runtime> = OnceLock::new();
         RT.get_or_init(|| {
             RuntimeBuilder::multi_thread()
@@ -1636,7 +1737,10 @@ mod stream_delta_batcher_tests {
                 .build()
                 .expect("build runtime")
         })
-        .handle()
+    }
+
+    fn runtime_handle() -> asupersync::runtime::RuntimeHandle {
+        runtime().handle()
     }
 
     fn model_entry(provider: &str, id: &str) -> ModelEntry {
@@ -1667,9 +1771,8 @@ mod stream_delta_batcher_tests {
         }
     }
 
-    fn build_test_app() -> PiApp {
+    fn build_test_app_with_provider(provider: Arc<dyn Provider>) -> (PiApp, mpsc::Receiver<PiMsg>) {
         let current = model_entry("openai", "gpt-4o-mini");
-        let provider: Arc<dyn Provider> = Arc::new(DummyProvider);
         let agent = Agent::new(
             provider,
             ToolRegistry::new(&[], Path::new("."), None),
@@ -1687,26 +1790,112 @@ mod stream_delta_batcher_tests {
             extension_paths: Vec::new(),
             theme_paths: Vec::new(),
         };
-        let (event_tx, _event_rx) = asupersync::channel::mpsc::channel(64);
-        PiApp::new(
-            agent,
-            session,
-            Config::default(),
-            resources,
-            resource_cli,
-            Path::new(".").to_path_buf(),
-            current.clone(),
-            Vec::new(),
-            vec![current],
-            Vec::new(),
-            event_tx,
-            runtime_handle(),
-            true,
-            None,
-            Some(KeyBindings::new()),
-            Vec::new(),
-            Usage::default(),
+        let (event_tx, event_rx) = asupersync::channel::mpsc::channel(64);
+        (
+            PiApp::new(
+                agent,
+                session,
+                Config::default(),
+                resources,
+                resource_cli,
+                Path::new(".").to_path_buf(),
+                current.clone(),
+                Vec::new(),
+                vec![current],
+                Vec::new(),
+                event_tx,
+                runtime_handle(),
+                true,
+                None,
+                Some(KeyBindings::new()),
+                Vec::new(),
+                Usage::default(),
+            ),
+            event_rx,
         )
+    }
+
+    fn build_test_app() -> PiApp {
+        let (app, _event_rx) = build_test_app_with_provider(Arc::new(DummyProvider));
+        app
+    }
+
+    #[derive(Default)]
+    struct ContinueProbeState {
+        calls: AtomicUsize,
+        saw_custom_message: AtomicBool,
+        saw_user_message: AtomicBool,
+    }
+
+    struct ContinueProbeProvider {
+        state: Arc<ContinueProbeState>,
+    }
+
+    impl ContinueProbeProvider {
+        fn assistant_message(&self, content: &str) -> AssistantMessage {
+            AssistantMessage {
+                content: vec![ContentBlock::Text(TextContent::new(content))],
+                api: self.api().to_string(),
+                provider: self.name().to_string(),
+                model: self.model_id().to_string(),
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: 0,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ContinueProbeProvider {
+        fn name(&self) -> &'static str {
+            "continue-probe"
+        }
+
+        fn api(&self) -> &'static str {
+            "continue-probe"
+        }
+
+        fn model_id(&self) -> &'static str {
+            "continue-probe-model"
+        }
+
+        async fn stream(
+            &self,
+            context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn futures::Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            self.state.calls.fetch_add(1, Ordering::SeqCst);
+            self.state.saw_custom_message.store(
+                context.messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        ModelMessage::Custom(CustomMessage { custom_type, content, .. })
+                            if custom_type == "note" && content == "continue-now"
+                    )
+                }),
+                Ordering::SeqCst,
+            );
+            self.state.saw_user_message.store(
+                context
+                    .messages
+                    .iter()
+                    .any(|message| matches!(message, ModelMessage::User(_))),
+                Ordering::SeqCst,
+            );
+
+            let partial = self.assistant_message("");
+            let message = self.assistant_message("continued");
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::Start { partial }),
+                Ok(StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message,
+                }),
+            ])))
+        }
     }
 
     #[test]
@@ -1798,6 +1987,55 @@ mod stream_delta_batcher_tests {
         batcher.flush(true);
         let second = rx.try_recv().expect("expected retained agent_done event");
         assert!(matches!(second, PiMsg::AgentDone { .. }));
+    }
+
+    #[test]
+    fn continue_pending_input_runs_agent_without_new_user_message() {
+        let state = Arc::new(ContinueProbeState::default());
+        let provider: Arc<dyn Provider> = Arc::new(ContinueProbeProvider {
+            state: Arc::clone(&state),
+        });
+        let (mut app, event_rx) = build_test_app_with_provider(provider);
+
+        runtime().block_on(async {
+            let cx = Cx::for_request();
+            let mut guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&app.agent), &cx)
+                .await
+                .expect("lock agent");
+            guard.add_message(ModelMessage::Custom(CustomMessage {
+                content: "continue-now".to_string(),
+                custom_type: "note".to_string(),
+                display: true,
+                details: None,
+                timestamp: 0,
+            }));
+        });
+
+        let _ = app.handle_pi_message(PiMsg::EnqueuePendingInput(PendingInput::Continue));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut saw_done = false;
+        while std::time::Instant::now() < deadline {
+            match event_rx.try_recv() {
+                Ok(PiMsg::AgentDone { .. }) => {
+                    saw_done = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+
+        assert!(saw_done, "continue path should finish an agent turn");
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state.saw_custom_message.load(Ordering::SeqCst),
+            "continue path should reuse the injected custom message as provider context"
+        );
+        assert!(
+            !state.saw_user_message.load(Ordering::SeqCst),
+            "continue path should not synthesize a user message"
+        );
     }
 
     #[test]

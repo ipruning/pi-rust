@@ -106,6 +106,7 @@ pub enum InputMode {
 pub enum PendingInput {
     Text(String),
     Content(Vec<ContentBlock>),
+    Continue,
 }
 
 /// Autocomplete dropdown state.

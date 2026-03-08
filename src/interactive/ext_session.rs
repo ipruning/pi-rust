@@ -12,6 +12,13 @@ pub(super) struct InteractiveExtensionHostActions {
 }
 
 impl InteractiveExtensionHostActions {
+    const fn should_trigger_turn(
+        deliver_as: Option<ExtensionDeliverAs>,
+        trigger_turn: bool,
+    ) -> bool {
+        trigger_turn && !matches!(deliver_as, Some(ExtensionDeliverAs::NextTurn))
+    }
+
     #[allow(clippy::unnecessary_wraps)]
     fn queue_custom_message(
         &self,
@@ -71,8 +78,6 @@ impl ExtensionHostActions for InteractiveExtensionHostActions {
         }
 
         // Agent is idle: persist immediately and update in-memory history so it affects the next run.
-        // Triggering a new turn for custom messages is handled separately and may be implemented later.
-        let _ = message.trigger_turn;
         self.append_to_session(custom_message.clone()).await?;
 
         let cx = Cx::for_request();
@@ -86,6 +91,12 @@ impl ExtensionHostActions for InteractiveExtensionHostActions {
                     .event_tx
                     .try_send(PiMsg::SystemNote(custom.content.clone()));
             }
+        }
+
+        if Self::should_trigger_turn(message.deliver_as, message.trigger_turn) {
+            let _ = self
+                .event_tx
+                .try_send(PiMsg::EnqueuePendingInput(PendingInput::Continue));
         }
 
         Ok(())
@@ -544,5 +555,167 @@ pub fn parse_extension_ui_response(
             value: Some(Value::String(input.to_string())),
             cancelled: false,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::agent::{Agent, AgentConfig};
+    use crate::model::StreamEvent;
+    use crate::provider::{Context, Provider, StreamOptions};
+    use crate::session::Session;
+    use crate::tools::ToolRegistry;
+    use asupersync::runtime::RuntimeBuilder;
+    use async_trait::async_trait;
+    use futures::stream;
+    use std::path::Path;
+    use std::pin::Pin;
+
+    struct NoopProvider;
+
+    #[async_trait]
+    impl Provider for NoopProvider {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+
+        fn api(&self) -> &'static str {
+            "noop"
+        }
+
+        fn model_id(&self) -> &'static str {
+            "noop-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn futures::Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    fn build_host_actions() -> (
+        InteractiveExtensionHostActions,
+        mpsc::Receiver<PiMsg>,
+        Arc<Mutex<Session>>,
+        Arc<Mutex<Agent>>,
+    ) {
+        let session = Arc::new(Mutex::new(Session::in_memory()));
+        let provider: Arc<dyn Provider> = Arc::new(NoopProvider);
+        let agent = Arc::new(Mutex::new(Agent::new(
+            provider,
+            ToolRegistry::new(&[], Path::new("."), None),
+            AgentConfig::default(),
+        )));
+        let (event_tx, event_rx) = mpsc::channel(8);
+        (
+            InteractiveExtensionHostActions {
+                session: Arc::clone(&session),
+                agent: Arc::clone(&agent),
+                event_tx,
+                extension_streaming: Arc::new(AtomicBool::new(false)),
+                user_queue: Arc::new(StdMutex::new(InteractiveMessageQueue::new(
+                    QueueMode::OneAtATime,
+                    QueueMode::OneAtATime,
+                ))),
+                injected_queue: Arc::new(StdMutex::new(InjectedMessageQueue::new(
+                    QueueMode::OneAtATime,
+                    QueueMode::OneAtATime,
+                ))),
+            },
+            event_rx,
+            session,
+            agent,
+        )
+    }
+
+    #[test]
+    fn idle_send_message_trigger_turn_enqueues_continue() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let (actions, event_rx, session, agent) = build_host_actions();
+
+            actions
+                .send_message(ExtensionSendMessage {
+                    extension_id: Some("ext".to_string()),
+                    custom_type: "note".to_string(),
+                    content: "continue-now".to_string(),
+                    display: false,
+                    details: None,
+                    deliver_as: Some(ExtensionDeliverAs::Steer),
+                    trigger_turn: true,
+                })
+                .await
+                .expect("send_message");
+
+            let queued = event_rx.try_recv().expect("continue should be queued");
+            assert!(matches!(
+                queued,
+                PiMsg::EnqueuePendingInput(PendingInput::Continue)
+            ));
+
+            let cx = Cx::for_request();
+            let session_guard = session.lock(&cx).await.expect("lock session");
+            assert!(
+                session_guard
+                    .to_messages_for_current_path()
+                    .iter()
+                    .any(|msg| {
+                        matches!(
+                            msg,
+                            ModelMessage::Custom(CustomMessage { custom_type, content, .. })
+                                if custom_type == "note" && content == "continue-now"
+                        )
+                    })
+            );
+            drop(session_guard);
+
+            let agent_guard = agent.lock(&cx).await.expect("lock agent");
+            assert!(agent_guard.messages().iter().any(|msg| {
+                matches!(
+                    msg,
+                    ModelMessage::Custom(CustomMessage { custom_type, content, .. })
+                        if custom_type == "note" && content == "continue-now"
+                )
+            }));
+        });
+    }
+
+    #[test]
+    fn idle_send_message_next_turn_ignores_trigger_turn() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let (actions, event_rx, _session, _agent) = build_host_actions();
+
+            actions
+                .send_message(ExtensionSendMessage {
+                    extension_id: Some("ext".to_string()),
+                    custom_type: "note".to_string(),
+                    content: "defer".to_string(),
+                    display: false,
+                    details: None,
+                    deliver_as: Some(ExtensionDeliverAs::NextTurn),
+                    trigger_turn: true,
+                })
+                .await
+                .expect("send_message");
+
+            assert!(
+                event_rx.try_recv().is_err(),
+                "nextTurn should stay deferred even when triggerTurn is set"
+            );
+        });
     }
 }
