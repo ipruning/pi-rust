@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::pin::Pin;
 
@@ -69,6 +70,66 @@ fn is_kimi_coding_provider(provider: &str) -> bool {
 #[inline]
 fn is_kimi_oauth_token(provider: &str, token: &str) -> bool {
     is_kimi_coding_provider(provider) && !token.starts_with("sk-")
+}
+
+fn bearer_token_from_authorization_header(value: &str) -> Option<String> {
+    let mut parts = value.split_whitespace();
+    let scheme = parts.next()?;
+    let bearer_value = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if scheme.eq_ignore_ascii_case("bearer") && !bearer_value.trim().is_empty() {
+        Some(bearer_value.trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn first_header_value_case_insensitive<'a>(
+    headers: &'a HashMap<String, String>,
+    names: &[&str],
+) -> Option<&'a str> {
+    headers.iter().find_map(|(key, value)| {
+        names
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+            .then_some(value.as_str())
+    })
+}
+
+enum AuthOverride {
+    ApiKey,
+    Authorization(String),
+}
+
+fn auth_override(options: &StreamOptions, compat: Option<&CompatConfig>) -> Option<AuthOverride> {
+    first_header_value_case_insensitive(&options.headers, &["authorization"])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| AuthOverride::Authorization(value.to_string()))
+        .or_else(|| {
+            first_header_value_case_insensitive(&options.headers, &["x-api-key"])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|_| AuthOverride::ApiKey)
+        })
+        .or_else(|| {
+            compat
+                .and_then(|compat| compat.custom_headers.as_ref())
+                .and_then(|headers| {
+                    first_header_value_case_insensitive(headers, &["authorization"])
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| AuthOverride::Authorization(value.to_string()))
+                        .or_else(|| {
+                            first_header_value_case_insensitive(headers, &["x-api-key"])
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(|_| AuthOverride::ApiKey)
+                        })
+                })
+        })
 }
 
 fn sanitize_ascii_header_value(value: &str, fallback: &str) -> String {
@@ -368,28 +429,10 @@ impl Provider for AnthropicProvider {
         context: &Context<'_>,
         options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let raw_auth_value = options
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .ok_or_else(|| {
-                Error::provider(
-                    self.name(),
-                    "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
-                )
-            })?;
-        let forced_bearer_token = if is_anthropic_provider(&self.provider) {
-            unmark_anthropic_oauth_bearer_token(&raw_auth_value).map(ToString::to_string)
-        } else {
-            None
-        };
-        let force_bearer = forced_bearer_token.is_some();
-        let auth_value = forced_bearer_token.unwrap_or(raw_auth_value);
-
         let request_body = self.build_request(context, options);
-        let anthropic_bearer_token =
-            force_bearer || is_anthropic_bearer_token(&self.provider, &auth_value);
-        let kimi_oauth_token = is_kimi_oauth_token(&self.provider, &auth_value);
+        let auth_override = auth_override(options, self.compat.as_ref());
+        let mut anthropic_bearer_token = false;
+        let mut kimi_oauth_token = false;
 
         // Build request with headers (Content-Type set by .json() below)
         let mut request = self
@@ -398,9 +441,50 @@ impl Provider for AnthropicProvider {
             .header("Accept", "text/event-stream")
             .header("anthropic-version", ANTHROPIC_API_VERSION);
 
+        match auth_override {
+            Some(AuthOverride::Authorization(ref authorization_value)) => {
+                if let Some(bearer_token) =
+                    bearer_token_from_authorization_header(authorization_value)
+                {
+                    anthropic_bearer_token =
+                        is_anthropic_bearer_token(&self.provider, &bearer_token);
+                    kimi_oauth_token = is_kimi_oauth_token(&self.provider, &bearer_token);
+                }
+            }
+            Some(AuthOverride::ApiKey) => {}
+            None => {
+                let raw_auth_value = options
+                    .api_key
+                    .clone()
+                    .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                    .ok_or_else(|| {
+                        Error::provider(
+                            self.name(),
+                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
+                        )
+                    })?;
+                let forced_bearer_token = if is_anthropic_provider(&self.provider) {
+                    unmark_anthropic_oauth_bearer_token(&raw_auth_value).map(ToString::to_string)
+                } else {
+                    None
+                };
+                let force_bearer = forced_bearer_token.is_some();
+                let auth_value = forced_bearer_token.unwrap_or(raw_auth_value);
+
+                anthropic_bearer_token =
+                    force_bearer || is_anthropic_bearer_token(&self.provider, &auth_value);
+                kimi_oauth_token = is_kimi_oauth_token(&self.provider, &auth_value);
+
+                if anthropic_bearer_token || kimi_oauth_token {
+                    request = request.header("Authorization", format!("Bearer {auth_value}"));
+                } else {
+                    request = request.header("X-API-Key", &auth_value);
+                }
+            }
+        }
+
         if anthropic_bearer_token {
             request = request
-                .header("Authorization", format!("Bearer {auth_value}"))
                 .header("anthropic-dangerous-direct-browser-access", "true")
                 .header("x-app", "cli")
                 .header(
@@ -411,20 +495,16 @@ impl Provider for AnthropicProvider {
                     ),
                 );
         } else if kimi_oauth_token {
-            request = request
-                .header("Authorization", format!("Bearer {auth_value}"))
-                .header(
-                    "user-agent",
-                    format!(
-                        "pi_agent_rust/{} (kimi-oauth, cli)",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                );
+            request = request.header(
+                "user-agent",
+                format!(
+                    "pi_agent_rust/{} (kimi-oauth, cli)",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            );
             for (name, value) in kimi_common_headers() {
                 request = request.header(name, value);
             }
-        } else {
-            request = request.header("X-API-Key", &auth_value);
         }
 
         let mut beta_flags: Vec<&str> = Vec::new();
@@ -2398,6 +2478,122 @@ mod tests {
             captured.headers.get("x-api-key").map(String::as_str),
             Some("sk-ant-test-key"),
         );
+    }
+
+    #[test]
+    fn test_compat_authorization_header_works_without_api_key() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+
+        let mut custom = HashMap::new();
+        custom.insert(
+            "Authorization".to_string(),
+            "Bearer sk-ant-oat-compat".to_string(),
+        );
+        let provider = AnthropicProvider::new("claude-test")
+            .with_base_url(base_url)
+            .with_compat(Some(crate::models::CompatConfig {
+                custom_headers: Some(custom),
+                ..Default::default()
+            }));
+
+        let context = Context {
+            system_prompt: Some("test".to_string().into()),
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("hi".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(&context, &StreamOptions::default())
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured request");
+        assert_eq!(
+            captured.headers.get("authorization").map(String::as_str),
+            Some("Bearer sk-ant-oat-compat")
+        );
+        assert!(!captured.headers.contains_key("x-api-key"));
+        assert_eq!(
+            captured
+                .headers
+                .get("anthropic-dangerous-direct-browser-access")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            captured.headers.get("x-app").map(String::as_str),
+            Some("cli")
+        );
+        assert!(
+            captured
+                .headers
+                .get("anthropic-beta")
+                .is_some_and(|value| value.contains("oauth-2025-04-20"))
+        );
+    }
+
+    #[test]
+    fn test_stream_option_x_api_key_header_works_without_api_key() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+
+        let provider = AnthropicProvider::new("claude-test").with_base_url(base_url);
+        let context = Context {
+            system_prompt: Some("test".to_string().into()),
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("hi".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "header-ant-key".to_string());
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(
+                    &context,
+                    &StreamOptions {
+                        headers,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured request");
+        assert_eq!(
+            captured.headers.get("x-api-key").map(String::as_str),
+            Some("header-ant-key")
+        );
+        assert!(!captured.headers.contains_key("authorization"));
     }
 
     #[test]

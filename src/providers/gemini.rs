@@ -28,6 +28,45 @@ const GOOGLE_GEMINI_CLI_BASE: &str = "https://cloudcode-pa.googleapis.com";
 const GOOGLE_ANTIGRAVITY_BASE: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8192;
 
+fn first_header_value_case_insensitive<'a>(
+    headers: &'a std::collections::HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+}
+
+fn authorization_override(
+    options: &StreamOptions,
+    compat: Option<&CompatConfig>,
+) -> Option<String> {
+    first_header_value_case_insensitive(&options.headers, "authorization")
+        .or_else(|| {
+            compat
+                .and_then(|compat| compat.custom_headers.as_ref())
+                .and_then(|headers| first_header_value_case_insensitive(headers, "authorization"))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn google_api_key_override(
+    options: &StreamOptions,
+    compat: Option<&CompatConfig>,
+) -> Option<String> {
+    first_header_value_case_insensitive(&options.headers, "x-goog-api-key")
+        .or_else(|| {
+            compat
+                .and_then(|compat| compat.custom_headers.as_ref())
+                .and_then(|headers| first_header_value_case_insensitive(headers, "x-goog-api-key"))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 // ============================================================================
 // Gemini Provider
 // ============================================================================
@@ -385,19 +424,29 @@ impl Provider for GeminiProvider {
             return Ok(Box::pin(stream));
         }
 
-        let auth_value = options
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-            .ok_or_else(|| {
-                Error::provider(
-                    self.name(),
-                    "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
-                )
-            })?;
+        let has_auth_override = google_api_key_override(options, self.compat.as_ref()).is_some()
+            || authorization_override(options, self.compat.as_ref()).is_some();
+        let auth_value = if has_auth_override {
+            None
+        } else {
+            Some(
+                options
+                    .api_key
+                    .clone()
+                    .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+                    .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+                    .ok_or_else(|| {
+                        Error::provider(
+                            self.name(),
+                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
+                        )
+                    })?,
+            )
+        };
 
-        request = request.header("x-goog-api-key", &auth_value);
+        if let Some(auth_value) = auth_value {
+            request = request.header("x-goog-api-key", &auth_value);
+        }
 
         // Apply provider-specific custom headers from compat config.
         if let Some(compat) = &self.compat {
@@ -967,7 +1016,12 @@ mod tests {
     use futures::{StreamExt, stream};
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn test_convert_user_text_message() {
@@ -1050,6 +1104,107 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CapturedRequest {
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    #[test]
+    fn test_stream_compat_google_api_key_header_works_without_api_key() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let mut custom_headers = HashMap::new();
+        custom_headers.insert(
+            "x-goog-api-key".to_string(),
+            "compat-google-key".to_string(),
+        );
+        let provider = GeminiProvider::new("gemini-2.0-flash")
+            .with_base_url(base_url)
+            .with_compat(Some(CompatConfig {
+                custom_headers: Some(custom_headers),
+                ..CompatConfig::default()
+            }));
+        let context = Context::owned(
+            None,
+            vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            Vec::new(),
+        );
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(&context, &StreamOptions::default())
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx.recv_timeout(Duration::from_secs(2)).expect("captured");
+        assert_eq!(
+            captured.headers.get("x-goog-api-key").map(String::as_str),
+            Some("compat-google-key")
+        );
+        let body: Value = serde_json::from_str(&captured.body).expect("body json");
+        assert_eq!(body["contents"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_stream_option_authorization_header_works_without_api_key() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let provider = GeminiProvider::new("gemini-2.0-flash").with_base_url(base_url);
+        let context = Context::owned(
+            None,
+            vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            Vec::new(),
+        );
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer compat-gemini-token".to_string(),
+        );
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(
+                    &context,
+                    &StreamOptions {
+                        headers,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx.recv_timeout(Duration::from_secs(2)).expect("captured");
+        assert_eq!(
+            captured.headers.get("authorization").map(String::as_str),
+            Some("Bearer compat-gemini-token")
+        );
+        let body: Value = serde_json::from_str(&captured.body).expect("body json");
+        assert_eq!(body["contents"][0]["role"], "user");
+    }
+
     fn load_fixture(file_name: &str) -> ProviderFixture {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/provider_responses")
@@ -1106,6 +1261,114 @@ mod tests {
 
             out
         })
+    }
+
+    fn success_sse_body() -> String {
+        [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#,
+            "",
+            r#"data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}"#,
+            "",
+        ]
+        .join("\n")
+    }
+
+    fn spawn_test_server(
+        status_code: u16,
+        content_type: &str,
+        body: &str,
+    ) -> (String, mpsc::Receiver<CapturedRequest>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel();
+        let body = body.to_string();
+        let content_type = content_type.to_string();
+
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match socket.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            }
+
+            let header_end = bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("request header boundary");
+            let header_text = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let headers = parse_headers(&header_text);
+            let mut request_body = bytes[header_end + 4..].to_vec();
+
+            let content_length = headers
+                .get("content-length")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            while request_body.len() < content_length {
+                match socket.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => request_body.extend_from_slice(&chunk[..n]),
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            }
+
+            tx.send(CapturedRequest {
+                headers,
+                body: String::from_utf8_lossy(&request_body).to_string(),
+            })
+            .expect("send captured request");
+
+            let reason = match status_code {
+                401 => "Unauthorized",
+                500 => "Internal Server Error",
+                _ => "OK",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .expect("write response");
+            socket.flush().expect("flush response");
+        });
+
+        (format!("http://{addr}"), rx)
+    }
+
+    fn parse_headers(header_text: &str) -> HashMap<String, String> {
+        let mut headers = HashMap::new();
+        for line in header_text.lines().skip(1) {
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
+        headers
     }
 
     fn summarize_event(event: &StreamEvent) -> EventSummary {
