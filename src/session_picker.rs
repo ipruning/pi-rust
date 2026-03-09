@@ -541,7 +541,6 @@ fn delete_session_file_with_trash_cmd(path: &Path, trash_cmd: &str) -> Result<()
     Ok(())
 }
 
-#[cfg(feature = "sqlite-sessions")]
 fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 2] {
     ["-wal", "-shm"].map(|suffix| {
         let mut candidate = path.as_os_str().to_os_string();
@@ -550,8 +549,8 @@ fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 2] {
     })
 }
 
+#[cfg(feature = "sqlite-sessions")]
 fn remove_sqlite_sidecars_best_effort(path: &Path, trash_cmd: &str) {
-    #[cfg(feature = "sqlite-sessions")]
     if path.extension().and_then(|ext| ext.to_str()) == Some("sqlite") {
         for auxiliary_path in sqlite_auxiliary_paths(path) {
             if !auxiliary_path.exists() {
@@ -572,6 +571,9 @@ fn remove_sqlite_sidecars_best_effort(path: &Path, trash_cmd: &str) {
         }
     }
 }
+
+#[cfg(not(feature = "sqlite-sessions"))]
+const fn remove_sqlite_sidecars_best_effort(_path: &Path, _trash_cmd: &str) {}
 
 fn remove_sidecar_dir_best_effort(sidecar_path: &Path, trash_cmd: &str) {
     if !sidecar_path.exists() {

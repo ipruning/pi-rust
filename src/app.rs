@@ -1488,7 +1488,8 @@ mod tests {
         let mut session = Session::in_memory();
         session.append_model_change("missing-provider".to_string(), "missing-model".to_string());
 
-        let registry = registry_with_entries(vec![test_model_entry("gpt-4o-mini", "openai-codex", true)]);
+        let registry =
+            registry_with_entries(vec![test_model_entry("gpt-4o-mini", "openai-codex", true)]);
         let selection =
             select_model_and_thinking(&cli, &config, &session, &registry, &[], Path::new("/tmp"))
                 .expect("selection should use the configured default model");

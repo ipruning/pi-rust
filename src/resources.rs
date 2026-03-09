@@ -40,10 +40,9 @@ fn read_dir_sorted_paths(dir: &Path) -> Vec<PathBuf> {
 
 fn resolved_path_kind(path: &Path) -> (bool, bool) {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => match fs::metadata(path) {
-            Ok(meta) => (meta.is_dir(), meta.is_file()),
-            Err(_) => (false, false),
-        },
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::metadata(path).map_or((false, false), |meta| (meta.is_dir(), meta.is_file()))
+        }
         Ok(meta) => (meta.is_dir(), meta.is_file()),
         Err(_) => (false, false),
     }
@@ -1940,7 +1939,10 @@ mod tests {
             disable_model_invocation: false,
         };
 
-        let tab_out = expand_skill_command("/skill:review\tfocus this file", &[skill.clone()]);
+        let tab_out = expand_skill_command(
+            "/skill:review\tfocus this file",
+            std::slice::from_ref(&skill),
+        );
         assert!(tab_out.contains("Skill body."));
         assert!(tab_out.ends_with("focus this file"));
 
@@ -2972,6 +2974,35 @@ still frontmatter",
         assert_eq!(result.skills[0].name, "my-skill");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_load_skills_ignores_alias_symlink_to_same_skill_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_root = tmp.path().join("skills");
+        let real_root = skills_root.join("real");
+        let skill_dir = real_root.join("my-skill");
+        fs::create_dir_all(&skill_dir).expect("mkdir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: Symlink alias guard test\n---\nBody",
+        )
+        .expect("write skill");
+
+        std::os::unix::fs::symlink(&real_root, skills_root.join("alias"))
+            .expect("create alias symlink");
+
+        let result = load_skills(LoadSkillsOptions {
+            cwd: tmp.path().to_path_buf(),
+            agent_dir: tmp.path().join("agent"),
+            skill_paths: vec![skills_root],
+            include_defaults: false,
+        });
+
+        assert_eq!(result.skills.len(), 1);
+        assert_eq!(result.skills[0].name, "my-skill");
+        assert!(result.diagnostics.is_empty());
+    }
+
     #[test]
     fn test_load_skills_prefers_lexicographically_first_duplicate_path() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3031,7 +3062,7 @@ still frontmatter",
 
         assert_eq!(themes.len(), 1);
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(themes[0].file_path, dark_ini.clone());
+        assert_eq!(themes[0].file_path, dark_ini);
         assert_eq!(
             diagnostics[0]
                 .collision

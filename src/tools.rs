@@ -1185,6 +1185,10 @@ pub(crate) fn resize_image_if_needed(
 }
 
 #[cfg(not(feature = "image-resize"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "The no-feature stub preserves the feature-enabled Result API at shared call sites."
+)]
 pub(crate) fn resize_image_if_needed(
     bytes: &[u8],
     mime_type: &'static str,

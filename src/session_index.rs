@@ -581,22 +581,32 @@ fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 2] {
 
 pub(crate) fn session_file_stats(path: &Path) -> Result<(i64, u64)> {
     let meta = fs::metadata(path)?;
-    let mut size = meta.len();
-    let mut modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-
     #[cfg(feature = "sqlite-sessions")]
-    if path.extension().and_then(|ext| ext.to_str()) == Some("sqlite") {
-        for auxiliary_path in sqlite_auxiliary_paths(path) {
-            let Ok(aux_meta) = fs::metadata(&auxiliary_path) else {
-                continue;
-            };
-            size = size.saturating_add(aux_meta.len());
-            let aux_modified = aux_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            if aux_modified > modified {
-                modified = aux_modified;
+    let (size, modified) = {
+        let mut size = meta.len();
+        let mut modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        if path.extension().and_then(|ext| ext.to_str()) == Some("sqlite") {
+            for auxiliary_path in sqlite_auxiliary_paths(path) {
+                let Ok(aux_meta) = fs::metadata(&auxiliary_path) else {
+                    continue;
+                };
+                size = size.saturating_add(aux_meta.len());
+                let aux_modified = aux_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                if aux_modified > modified {
+                    modified = aux_modified;
+                }
             }
         }
-    }
+
+        (size, modified)
+    };
+
+    #[cfg(not(feature = "sqlite-sessions"))]
+    let (size, modified) = (
+        meta.len(),
+        meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+    );
 
     let millis = modified
         .duration_since(UNIX_EPOCH)
