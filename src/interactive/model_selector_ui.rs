@@ -166,39 +166,10 @@ impl PiApp {
             }
         };
 
-        let Ok(mut agent_guard) = self.agent.try_lock() else {
-            self.status_message = Some("Agent busy; try again".to_string());
+        if let Err(message) = self.switch_active_model(&next, provider_impl, resolved_key_opt) {
+            self.status_message = Some(message);
             return;
-        };
-        agent_guard.set_provider(provider_impl);
-        agent_guard
-            .stream_options_mut()
-            .api_key
-            .clone_from(&resolved_key_opt);
-        agent_guard
-            .stream_options_mut()
-            .headers
-            .clone_from(&next.headers);
-        drop(agent_guard);
-
-        let Ok(mut session_guard) = self.session.try_lock() else {
-            self.status_message = Some("Session busy; try again".to_string());
-            return;
-        };
-        session_guard.header.provider = Some(next.model.provider.clone());
-        session_guard.header.model_id = Some(next.model.id.clone());
-        session_guard.append_model_change(next.model.provider.clone(), next.model.id.clone());
-        drop(session_guard);
-        self.spawn_save_session();
-
-        self.model_entry = next.clone();
-        if let Ok(mut guard) = self.model_entry_shared.lock() {
-            *guard = next;
         }
-        self.model = format!(
-            "{}/{}",
-            self.model_entry.model.provider, self.model_entry.model.id
-        );
         self.status_message = Some(format!("Switched model: {}", self.model));
     }
 
@@ -521,6 +492,39 @@ mod tests {
             guard.stream_options_mut().api_key.is_none(),
             "switching to a keyless model must clear stale API key"
         );
+    }
+
+    #[test]
+    fn apply_model_selection_clamps_thinking_level_for_non_reasoning_targets() {
+        let current = model_entry("openai", "gpt-5.2", Some("old-key"));
+        let mut next = model_entry("ollama", "llama3.2", None);
+        next.auth_header = false;
+        next.model.reasoning = false;
+        let mut app = build_test_app(current.clone(), vec![current, next.clone()]);
+
+        {
+            let mut guard = app.agent.try_lock().expect("agent lock");
+            guard.stream_options_mut().thinking_level = Some(crate::model::ThinkingLevel::High);
+        }
+        {
+            let mut guard = app.session.try_lock().expect("session lock");
+            guard.header.thinking_level = Some(crate::model::ThinkingLevel::High.to_string());
+        }
+
+        app.apply_model_selection(&crate::model_selector::ModelKey {
+            provider: next.model.provider.clone(),
+            id: next.model.id.clone(),
+        });
+
+        let mut agent_guard = app.agent.try_lock().expect("agent lock");
+        assert_eq!(
+            agent_guard.stream_options_mut().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+        drop(agent_guard);
+
+        let session_guard = app.session.try_lock().expect("session lock");
+        assert_eq!(session_guard.header.thinking_level.as_deref(), Some("off"));
     }
 
     #[test]

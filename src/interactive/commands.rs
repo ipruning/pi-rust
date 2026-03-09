@@ -464,6 +464,16 @@ pub(super) fn resolve_model_key_from_default_auth(entry: &ModelEntry) -> Option<
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
 }
 
+fn session_thinking_level(
+    session: &crate::session::Session,
+) -> Option<crate::model::ThinkingLevel> {
+    session
+        .header
+        .thinking_level
+        .as_deref()
+        .and_then(|value| value.parse::<crate::model::ThinkingLevel>().ok())
+}
+
 pub fn resolve_scoped_model_entries(
     patterns: &[String],
     available_models: &[ModelEntry],
@@ -659,6 +669,52 @@ impl PiApp {
         if let Ok(mut shared_entry) = self.model_entry_shared.lock() {
             shared_entry.api_key.clone_from(&resolved_key_opt);
         }
+    }
+
+    pub(super) fn switch_active_model(
+        &mut self,
+        next: &ModelEntry,
+        provider_impl: std::sync::Arc<dyn crate::provider::Provider>,
+        resolved_key_opt: Option<String>,
+    ) -> Result<(), String> {
+        let Ok(mut agent_guard) = self.agent.try_lock() else {
+            return Err("Agent busy; try again".to_string());
+        };
+        let Ok(mut session_guard) = self.session.try_lock() else {
+            return Err("Session busy; try again".to_string());
+        };
+
+        let current_thinking = agent_guard
+            .stream_options()
+            .thinking_level
+            .unwrap_or_default();
+        let next_thinking = next.clamp_thinking_level(current_thinking);
+        let previous_thinking = session_thinking_level(&session_guard);
+
+        agent_guard.set_provider(provider_impl);
+        let stream_options = agent_guard.stream_options_mut();
+        stream_options.api_key.clone_from(&resolved_key_opt);
+        stream_options.headers.clone_from(&next.headers);
+        stream_options.thinking_level = Some(next_thinking);
+
+        session_guard.header.provider = Some(next.model.provider.clone());
+        session_guard.header.model_id = Some(next.model.id.clone());
+        session_guard.append_model_change(next.model.provider.clone(), next.model.id.clone());
+        session_guard.header.thinking_level = Some(next_thinking.to_string());
+        if previous_thinking != Some(next_thinking) {
+            session_guard.append_thinking_level_change(next_thinking.to_string());
+        }
+
+        drop(session_guard);
+        drop(agent_guard);
+        self.spawn_save_session();
+
+        self.model_entry = next.clone();
+        if let Ok(mut guard) = self.model_entry_shared.lock() {
+            *guard = next.clone();
+        }
+        self.model = format!("{}/{}", next.model.provider, next.model.id);
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1917,30 +1973,10 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
             }
         };
 
-        let Ok(mut agent_guard) = self.agent.try_lock() else {
-            self.status_message = Some("Agent busy; try again".to_string());
+        if let Err(message) = self.switch_active_model(&next, provider_impl, resolved_key_opt) {
+            self.status_message = Some(message);
             return None;
-        };
-        agent_guard.set_provider(provider_impl);
-        agent_guard
-            .stream_options_mut()
-            .api_key
-            .clone_from(&resolved_key_opt);
-        agent_guard
-            .stream_options_mut()
-            .headers
-            .clone_from(&next.headers);
-        drop(agent_guard);
-
-        let Ok(mut session_guard) = self.session.try_lock() else {
-            self.status_message = Some("Session busy; try again".to_string());
-            return None;
-        };
-        session_guard.header.provider = Some(next.model.provider.clone());
-        session_guard.header.model_id = Some(next.model.id.clone());
-        session_guard.append_model_change(next.model.provider.clone(), next.model.id.clone());
-        drop(session_guard);
-        self.spawn_save_session();
+        }
 
         if !self
             .available_models
@@ -1949,11 +1985,6 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
         {
             self.available_models.push(next.clone());
         }
-        self.model_entry = next.clone();
-        if let Ok(mut guard) = self.model_entry_shared.lock() {
-            *guard = next.clone();
-        }
-        self.model = format!("{}/{}", next.model.provider, next.model.id);
 
         self.status_message = Some(format!("Switched model: {}", self.model));
         None
