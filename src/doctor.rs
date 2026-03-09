@@ -1217,24 +1217,6 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    struct CurrentDirGuard {
-        original: PathBuf,
-    }
-
-    impl CurrentDirGuard {
-        fn set(path: &Path) -> Self {
-            let original = std::env::current_dir().expect("read current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self { original }
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
-        }
-    }
-
     fn write_extension_fixture(cwd: &Path, source: &str) -> PathBuf {
         let extension_dir = cwd.join("ext");
         std::fs::create_dir_all(&extension_dir).expect("create extension dir");
@@ -1552,8 +1534,6 @@ mod tests {
 
     #[test]
     fn run_doctor_extension_path_uses_supplied_cwd_for_policy_resolution() {
-        let current_dir = tempfile::tempdir().expect("current dir");
-        let _guard = CurrentDirGuard::set(current_dir.path());
         let project = tempfile::tempdir().expect("project dir");
         let config_dir = project.path().join(".pi");
         std::fs::create_dir_all(&config_dir).expect("create project config dir");
@@ -1589,8 +1569,6 @@ export default function(pi) {
 
     #[test]
     fn run_doctor_extension_path_reports_config_load_failure_without_aborting() {
-        let current_dir = tempfile::tempdir().expect("current dir");
-        let _guard = CurrentDirGuard::set(current_dir.path());
         let project = tempfile::tempdir().expect("project dir");
         let config_dir = project.path().join(".pi");
         std::fs::create_dir_all(&config_dir).expect("create project config dir");
@@ -1633,8 +1611,6 @@ import net from "node:net";
 
     #[test]
     fn run_doctor_extension_path_config_load_failure_falls_back_to_safe_policy() {
-        let current_dir = tempfile::tempdir().expect("current dir");
-        let _guard = CurrentDirGuard::set(current_dir.path());
         let project = tempfile::tempdir().expect("project dir");
         let config_dir = project.path().join(".pi");
         std::fs::create_dir_all(&config_dir).expect("create project config dir");
@@ -1673,8 +1649,6 @@ export default function(pi) {
 
     #[test]
     fn run_doctor_extension_path_config_load_failure_honors_cli_policy_override() {
-        let current_dir = tempfile::tempdir().expect("current dir");
-        let _guard = CurrentDirGuard::set(current_dir.path());
         let project = tempfile::tempdir().expect("project dir");
         let config_dir = project.path().join(".pi");
         std::fs::create_dir_all(&config_dir).expect("create project config dir");
