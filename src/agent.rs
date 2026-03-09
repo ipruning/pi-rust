@@ -33,7 +33,7 @@ use crate::model::{
     StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
     UserContent, UserMessage,
 };
-use crate::models::{ModelEntry, ModelRegistry};
+use crate::models::{ModelEntry, ModelRegistry, model_requires_configured_credential};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::session::{AutosaveFlushTrigger, Session, SessionHandle};
 use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
@@ -4923,19 +4923,29 @@ impl AgentSession {
     }
 
     pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
-        {
-            let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
-                .await
-                .map_err(|e| Error::session(e.to_string()))?;
-            session.set_model_header(
-                Some(provider_id.to_string()),
-                Some(model_id.to_string()),
-                None,
-            );
+        let target_entry = self
+            .model_registry
+            .as_ref()
+            .and_then(|registry| registry.find(provider_id, model_id))
+            .ok_or_else(|| {
+                Error::validation(format!(
+                    "Unable to switch provider/model to {provider_id}/{model_id}"
+                ))
+            })?;
+
+        let resolved_key = self.resolve_stream_api_key_for_model(&target_entry);
+        if model_requires_configured_credential(&target_entry) && resolved_key.is_none() {
+            return Err(Error::auth(format!(
+                "Missing credentials for {provider_id}/{model_id}"
+            )));
         }
+
+        let next_thinking = target_entry.clamp_thinking_level(
+            self.agent
+                .stream_options()
+                .thinking_level
+                .unwrap_or_default(),
+        );
 
         self.apply_session_model_selection(provider_id, model_id);
         let provider = self.agent.provider();
@@ -4943,6 +4953,29 @@ impl AgentSession {
             return Err(Error::validation(format!(
                 "Unable to switch provider/model to {provider_id}/{model_id}"
             )));
+        }
+        self.agent.stream_options_mut().thinking_level = Some(next_thinking);
+
+        {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            let previous_thinking = session
+                .header
+                .thinking_level
+                .as_deref()
+                .and_then(|value| value.parse::<crate::model::ThinkingLevel>().ok());
+            session.set_model_header(
+                Some(provider_id.to_string()),
+                Some(model_id.to_string()),
+                Some(next_thinking.to_string()),
+            );
+            if previous_thinking != Some(next_thinking) {
+                session.append_thinking_level_change(next_thinking.to_string());
+            }
         }
 
         self.persist_session().await
@@ -6743,6 +6776,187 @@ mod tests {
             None,
             "blank model keys must not be treated as valid credentials"
         );
+    }
+
+    #[test]
+    fn set_provider_model_preserves_session_header_when_switch_fails() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+            let mut agent_session = build_switch_test_session(&auth);
+
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.header.provider = Some("anthropic".to_string());
+                session.header.model_id = Some("claude-sonnet-4-5".to_string());
+            }
+
+            let err = agent_session
+                .set_provider_model("missing-provider", "missing-model")
+                .await
+                .expect_err("missing model should not switch");
+            assert!(
+                err.to_string()
+                    .contains("Unable to switch provider/model to missing-provider/missing-model"),
+                "unexpected error: {err}"
+            );
+            assert_eq!(agent_session.agent.provider().name(), "anthropic");
+            assert_eq!(
+                agent_session.agent.provider().model_id(),
+                "claude-sonnet-4-5"
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("anthropic"));
+            assert_eq!(
+                session.header.model_id.as_deref(),
+                Some("claude-sonnet-4-5")
+            );
+        });
+    }
+
+    #[test]
+    fn set_provider_model_rejects_missing_credentials_without_switching() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+            let mut agent_session = build_switch_test_session(&auth);
+
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.header.provider = Some("anthropic".to_string());
+                session.header.model_id = Some("claude-sonnet-4-5".to_string());
+            }
+
+            let err = agent_session
+                .set_provider_model("openai", "gpt-4o")
+                .await
+                .expect_err("missing credentials should abort model switch");
+            assert!(
+                err.to_string()
+                    .contains("Missing credentials for openai/gpt-4o"),
+                "unexpected error: {err}"
+            );
+            assert_eq!(agent_session.agent.provider().name(), "anthropic");
+            assert_eq!(
+                agent_session.agent.provider().model_id(),
+                "claude-sonnet-4-5"
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("anthropic"));
+            assert_eq!(
+                session.header.model_id.as_deref(),
+                Some("claude-sonnet-4-5")
+            );
+        });
+    }
+
+    #[test]
+    fn set_provider_model_clamps_thinking_for_non_reasoning_targets() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+
+            let mut registry = ModelRegistry::load(&auth, None);
+            registry.merge_entries(vec![ModelEntry {
+                model: Model {
+                    id: "plain-model".to_string(),
+                    name: "Plain Model".to_string(),
+                    api: "openai-completions".to_string(),
+                    provider: "acme".to_string(),
+                    base_url: "https://example.invalid/v1".to_string(),
+                    reasoning: false,
+                    input: vec![InputType::Text],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 128_000,
+                    max_tokens: 8_192,
+                    headers: HashMap::new(),
+                },
+                api_key: None,
+                headers: HashMap::new(),
+                auth_header: false,
+                compat: None,
+                oauth_config: None,
+            }]);
+
+            let mut agent_session = build_switch_test_session(&auth);
+            agent_session.set_model_registry(registry);
+            agent_session.agent.stream_options_mut().thinking_level =
+                Some(crate::model::ThinkingLevel::High);
+
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.header.thinking_level = Some("high".to_string());
+            }
+
+            agent_session
+                .set_provider_model("acme", "plain-model")
+                .await
+                .expect("switch should clamp unsupported thinking");
+
+            assert_eq!(agent_session.agent.provider().name(), "acme");
+            assert_eq!(agent_session.agent.provider().model_id(), "plain-model");
+            assert_eq!(
+                agent_session.agent.stream_options().thinking_level,
+                Some(crate::model::ThinkingLevel::Off)
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("acme"));
+            assert_eq!(session.header.model_id.as_deref(), Some("plain-model"));
+            assert_eq!(session.header.thinking_level.as_deref(), Some("off"));
+        });
     }
 
     #[test]

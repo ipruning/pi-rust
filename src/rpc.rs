@@ -4113,6 +4113,14 @@ async fn cycle_model_for_rpc(
     let next_index = current_index.map_or(0, |idx| (idx + 1) % candidates.len());
 
     let next_entry = candidates[next_index].clone();
+    let key = resolve_model_key(&options.auth, &next_entry);
+    if model_requires_configured_credential(&next_entry) && key.is_none() {
+        return Err(Error::auth(format!(
+            "Missing credentials for {}/{}",
+            next_entry.model.provider, next_entry.model.id
+        )));
+    }
+
     let provider_impl = crate::providers::create_provider(
         &next_entry,
         guard
@@ -4122,13 +4130,6 @@ async fn cycle_model_for_rpc(
     )?;
     guard.agent.set_provider(provider_impl);
 
-    let key = resolve_model_key(&options.auth, &next_entry);
-    if model_requires_configured_credential(&next_entry) && key.is_none() {
-        return Err(Error::auth(format!(
-            "Missing credentials for {}/{}",
-            next_entry.model.provider, next_entry.model.id
-        )));
-    }
     guard.agent.stream_options_mut().api_key.clone_from(&key);
     guard
         .agent
@@ -4159,6 +4160,7 @@ async fn cycle_model_for_rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{Agent, AgentConfig};
     use crate::auth::AuthCredential;
     use crate::model::{
         AssistantMessage, ContentBlock, ImageContent, StopReason, TextContent, ThinkingLevel,
@@ -4172,6 +4174,7 @@ mod tests {
     use futures::stream;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::mpsc::{Receiver, TryRecvError};
@@ -5490,6 +5493,95 @@ export default function init(pi) {
         let resolved = current_model_entry(&session, &options).expect("resolve aliased model");
         assert_eq!(resolved.model.provider, "openrouter");
         assert_eq!(resolved.model.id, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn cycle_model_for_rpc_does_not_mutate_provider_when_credentials_are_missing() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let mut current = dummy_entry("gpt-4o-mini", true);
+            current.model.provider = "openai".to_string();
+            current.model.api = "openai-completions".to_string();
+            current.model.base_url = "https://api.openai.com/v1".to_string();
+            current.auth_header = true;
+
+            let next = ModelEntry {
+                model: Model {
+                    id: "cloud-model".to_string(),
+                    name: "cloud-model".to_string(),
+                    api: "openai-completions".to_string(),
+                    provider: "acme-remote".to_string(),
+                    base_url: "https://example.invalid/v1".to_string(),
+                    reasoning: true,
+                    input: vec![InputType::Text],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 128_000,
+                    max_tokens: 8_192,
+                    headers: HashMap::new(),
+                },
+                api_key: None,
+                headers: HashMap::new(),
+                auth_header: true,
+                compat: None,
+                oauth_config: None,
+            };
+
+            let provider =
+                crate::providers::create_provider(&current, None).expect("create current provider");
+            let agent = Agent::new(
+                provider,
+                ToolRegistry::new(&[], Path::new("."), None),
+                AgentConfig::default(),
+            );
+
+            let mut session = Session::in_memory();
+            session.header.provider = Some(current.model.provider.clone());
+            session.header.model_id = Some(current.model.id.clone());
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::new(asupersync::sync::Mutex::new(session)),
+                false,
+                crate::compaction::ResolvedCompactionSettings::default(),
+            );
+
+            let options = rpc_options_with_models(vec![current.clone(), next]);
+            let err = cycle_model_for_rpc(&mut agent_session, &options)
+                .await
+                .expect_err("missing credentials should abort model cycling");
+            assert!(
+                err.to_string().contains("Missing credentials"),
+                "unexpected error: {err}"
+            );
+            assert_eq!(
+                agent_session.agent.provider().name(),
+                current.model.provider
+            );
+            assert_eq!(agent_session.agent.provider().model_id(), current.model.id);
+
+            let cx = AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(
+                session.header.provider.as_deref(),
+                Some(current.model.provider.as_str())
+            );
+            assert_eq!(
+                session.header.model_id.as_deref(),
+                Some(current.model.id.as_str())
+            );
+        });
     }
 
     #[test]
