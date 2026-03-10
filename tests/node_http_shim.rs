@@ -636,6 +636,44 @@ fn request_lowercases_headers() {
     assert_eq!(headers["x-custom-header"], "value");
 }
 
+#[test]
+fn request_header_mutators_update_hostcall_headers() {
+    let result = eval_http_mock(
+        r"return Promise.resolve({ status: 200, headers: {}, body: JSON.stringify(req.headers) });",
+        r"
+        const req = http.request({
+            hostname: 'example.com',
+            path: '/',
+            headers: { 'X-Initial': 'seed' }
+        }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                resolve({
+                    result: JSON.stringify({
+                        initial: req.getHeader('X-Initial'),
+                        afterSet: req.getHeader('content-type') + '|' + req.getHeader('x-custom'),
+                        afterRemove: String(req.getHeader('x-custom')),
+                        sent: JSON.parse(body),
+                    }),
+                });
+            });
+        });
+        req.setHeader('Content-Type', 'application/json');
+        req.setHeader('X-Custom', 'value');
+        req.removeHeader('X-Custom');
+        req.end();
+        ",
+    );
+    let payload: serde_json::Value = serde_json::from_str(&result).expect("parse result JSON");
+    assert_eq!(payload["initial"], "seed");
+    assert_eq!(payload["afterSet"], "application/json|value");
+    assert_eq!(payload["afterRemove"], "undefined");
+    assert_eq!(payload["sent"]["x-initial"], "seed");
+    assert_eq!(payload["sent"]["content-type"], "application/json");
+    assert!(payload["sent"].get("x-custom").is_none());
+}
+
 // ─── Error handling ─────────────────────────────────────────────────────────
 
 #[test]
@@ -725,6 +763,49 @@ fn response_empty_body_emits_end_without_data() {
 }
 
 #[test]
+fn response_destroy_before_body_suppresses_data_and_end() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: "late" });"#,
+        r#"
+        const events = [];
+        http.get("http://example.com/", (res) => {
+            events.push('response');
+            res.on('data', () => events.push('data'));
+            res.on('end', () => events.push('end'));
+            res.on('close', () => events.push('close'));
+            res.destroy();
+        });
+        Promise.resolve().then(() => Promise.resolve().then(() => {
+            resolve({ result: events.join(',') });
+        }));
+        "#,
+    );
+    assert_eq!(result, "response,close");
+}
+
+#[test]
+fn response_destroy_during_data_suppresses_end() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: "late" });"#,
+        r#"
+        const events = [];
+        http.get("http://example.com/", (res) => {
+            res.on('data', () => {
+                events.push('data');
+                res.destroy();
+            });
+            res.on('end', () => events.push('end'));
+            res.on('close', () => events.push('close'));
+        });
+        Promise.resolve().then(() => Promise.resolve().then(() => {
+            resolve({ result: events.join(',') });
+        }));
+        "#,
+    );
+    assert_eq!(result, "data,close");
+}
+
+#[test]
 fn response_body_bytes_emits_binary_chunk() {
     let result = eval_http_mock(
         r#"return Promise.resolve({ status: 200, headers: {}, body_bytes: "AP9B" });"#,
@@ -743,6 +824,28 @@ fn response_body_bytes_emits_binary_chunk() {
         "#,
     );
     assert_eq!(result, "true|0,255,65");
+}
+
+#[test]
+fn response_set_encoding_decodes_body_bytes_to_text() {
+    let result = eval_http_mock(
+        r"return Promise.resolve({ status: 200, headers: {}, body_bytes: Buffer.from('héllo').toString('base64') });",
+        r#"
+        http.get("http://example.com/text", (res) => {
+            res.setEncoding('utf8');
+            let chunkType = '';
+            let body = '';
+            res.on('data', (chunk) => {
+                chunkType = typeof chunk;
+                body += chunk;
+            });
+            res.on('end', () => {
+                resolve({ result: chunkType + "|" + body });
+            });
+        });
+        "#,
+    );
+    assert_eq!(result, "string|héllo");
 }
 
 // ─── Timeout option ─────────────────────────────────────────────────────────
@@ -837,6 +940,77 @@ fn destroy_with_error_emits_error_and_close() {
     })()",
     );
     assert_eq!(result, "error:test error,close");
+}
+
+#[test]
+fn abort_after_end_suppresses_late_response_events() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: "late" });"#,
+        r"
+        const events = [];
+        const req = http.request({ hostname: 'example.com', path: '/' });
+        req.on('response', (res) => {
+            events.push('response');
+            res.on('data', () => events.push('data'));
+            res.on('end', () => events.push('end'));
+        });
+        req.on('abort', () => events.push('abort'));
+        req.on('close', () => events.push('close'));
+        req.end();
+        req.abort();
+        Promise.resolve().then(() => Promise.resolve().then(() => {
+            resolve({ result: events.join(',') });
+        }));
+        ",
+    );
+    assert_eq!(result, "abort,close");
+}
+
+#[test]
+fn abort_in_response_callback_suppresses_body_delivery() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: "late" });"#,
+        r#"
+        const events = [];
+        let req;
+        req = http.get("http://example.com/", (res) => {
+            events.push('response');
+            res.on('data', () => events.push('data'));
+            res.on('end', () => events.push('end'));
+            req.abort();
+        });
+        req.on('abort', () => events.push('abort'));
+        req.on('close', () => events.push('close'));
+        Promise.resolve().then(() => Promise.resolve().then(() => {
+            resolve({ result: events.join(',') });
+        }));
+        "#,
+    );
+    assert_eq!(result, "response,abort,close");
+}
+
+#[test]
+fn destroy_after_end_suppresses_late_response_events() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: "late" });"#,
+        r"
+        const events = [];
+        const req = http.request({ hostname: 'example.com', path: '/' });
+        req.on('response', (res) => {
+            events.push('response');
+            res.on('data', () => events.push('data'));
+            res.on('end', () => events.push('end'));
+        });
+        req.on('error', (err) => events.push('error:' + err.message));
+        req.on('close', () => events.push('close'));
+        req.end();
+        req.destroy(new Error('boom'));
+        Promise.resolve().then(() => Promise.resolve().then(() => {
+            resolve({ result: events.join(',') });
+        }));
+        ",
+    );
+    assert_eq!(result, "error:boom,close");
 }
 
 // ─── Default status code ────────────────────────────────────────────────────
