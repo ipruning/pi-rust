@@ -2145,7 +2145,7 @@ impl AgentSessionHostActions {
     }
 
     async fn append_to_session(&self, message: Message) -> Result<()> {
-        let cx = crate::agent_cx::AgentCx::for_request();
+        let cx = crate::agent_cx::AgentCx::for_current_or_request();
         let mut session = self
             .session
             .lock(cx.cx())
@@ -2333,6 +2333,7 @@ mod extensions_integration_tests {
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     #[derive(Debug)]
     struct NoopProvider;
@@ -2829,6 +2830,60 @@ mod extensions_integration_tests {
                     )
                 }),
                 "expected custom message to be persisted, got {messages:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn agent_host_actions_send_message_inherits_cancelled_context_when_locked() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let actions = AgentSessionHostActions {
+                session: Arc::clone(&session),
+                injected: Arc::new(StdMutex::new(ExtensionInjectedQueue::default())),
+                is_streaming: Arc::new(AtomicBool::new(false)),
+                is_turn_active: Arc::new(AtomicBool::new(false)),
+                pending_idle_actions: Arc::new(StdMutex::new(VecDeque::new())),
+            };
+
+            let hold_cx = crate::agent_cx::AgentCx::for_request();
+            let held_guard = session.lock(hold_cx.cx()).await.expect("lock session");
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+            let inner = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                Duration::from_millis(100),
+                actions.send_message(ExtensionSendMessage {
+                    extension_id: Some("ext".to_string()),
+                    custom_type: "note".to_string(),
+                    content: "blocked".to_string(),
+                    display: false,
+                    details: None,
+                    deliver_as: Some(ExtensionDeliverAs::NextTurn),
+                    trigger_turn: false,
+                }),
+            )
+            .await;
+            let outcome = inner.expect("cancelled helper should finish before timeout");
+            let err = outcome.expect_err("session append should fail under inherited cancellation");
+            assert!(
+                err.to_string().contains("mutex lock cancelled"),
+                "unexpected error: {err}"
+            );
+
+            drop(held_guard);
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let guard = session.lock(cx.cx()).await.expect("lock session");
+            assert!(
+                guard.to_messages_for_current_path().is_empty(),
+                "cancelled send_message should not append a message"
             );
         });
     }

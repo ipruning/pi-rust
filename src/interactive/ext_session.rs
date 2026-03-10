@@ -41,7 +41,7 @@ impl InteractiveExtensionHostActions {
     }
 
     async fn append_to_session(&self, message: ModelMessage) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut session_guard = self
             .session
             .lock(&cx)
@@ -80,7 +80,7 @@ impl ExtensionHostActions for InteractiveExtensionHostActions {
         // Agent is idle: persist immediately and update in-memory history so it affects the next run.
         self.append_to_session(custom_message.clone()).await?;
 
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         if let Ok(mut agent_guard) = self.agent.lock(&cx).await {
             agent_guard.add_message(custom_message.clone());
         }
@@ -148,7 +148,7 @@ impl ExtensionSession for InteractiveExtensionSession {
             extension_model_from_entry(&guard)
         };
 
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let (
             session_file,
             session_id,
@@ -242,7 +242,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn get_messages(&self) -> Vec<SessionMessage> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let Ok(guard) = self.session.lock(&cx).await else {
             return Vec::new();
         };
@@ -265,7 +265,7 @@ impl ExtensionSession for InteractiveExtensionSession {
 
     async fn get_entries(&self) -> Vec<Value> {
         // Spec §3.1: return ALL session entries (entire session file), append order.
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let Ok(guard) = self.session.lock(&cx).await else {
             return Vec::new();
         };
@@ -278,7 +278,7 @@ impl ExtensionSession for InteractiveExtensionSession {
 
     async fn get_branch(&self) -> Vec<Value> {
         // Spec §3.2: return current path from root to leaf.
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let Ok(guard) = self.session.lock(&cx).await else {
             return Vec::new();
         };
@@ -290,7 +290,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn set_name(&self, name: String) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
@@ -303,7 +303,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn append_message(&self, message: SessionMessage) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
@@ -325,7 +325,7 @@ impl ExtensionSession for InteractiveExtensionSession {
                 "customType must not be empty",
             ));
         }
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
@@ -338,7 +338,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn set_model(&self, provider: String, model_id: String) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
@@ -356,7 +356,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn get_model(&self) -> (Option<String>, Option<String>) {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let Ok(guard) = self.session.lock(&cx).await else {
             return (None, None);
         };
@@ -364,7 +364,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn set_thinking_level(&self, level: String) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let effective_level = match level.parse::<crate::model::ThinkingLevel>() {
             Ok(parsed) => self
                 .model_entry
@@ -389,7 +389,7 @@ impl ExtensionSession for InteractiveExtensionSession {
     }
 
     async fn get_thinking_level(&self) -> Option<String> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let Ok(guard) = self.session.lock(&cx).await else {
             return None;
         };
@@ -401,7 +401,7 @@ impl ExtensionSession for InteractiveExtensionSession {
         target_id: String,
         label: Option<String>,
     ) -> crate::error::Result<()> {
-        let cx = Cx::for_request();
+        let cx = Cx::current().unwrap_or_else(Cx::for_request);
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
@@ -592,6 +592,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::pin::Pin;
+    use std::time::Duration;
 
     type TestStream =
         Pin<Box<dyn futures::Stream<Item = crate::error::Result<StreamEvent>> + Send>>;
@@ -734,6 +735,50 @@ mod tests {
                 }),
                 "expected custom message in interactive extension session messages, got {messages:?}"
             );
+        });
+    }
+
+    #[test]
+    fn interactive_extension_session_set_name_inherits_cancelled_context_when_locked() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let ext_session = InteractiveExtensionSession {
+                session: Arc::clone(&session),
+                model_entry: Arc::new(StdMutex::new(dummy_model_entry())),
+                is_streaming: Arc::new(AtomicBool::new(false)),
+                is_compacting: Arc::new(AtomicBool::new(false)),
+                config: Config::default(),
+                save_enabled: false,
+            };
+
+            let hold_cx = Cx::for_request();
+            let held_guard = session.lock(&hold_cx).await.expect("lock session");
+
+            let ambient_cx = Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = Cx::set_current(Some(ambient_cx));
+            let inner = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                Duration::from_millis(100),
+                ext_session.set_name("cancelled-name".to_string()),
+            )
+            .await;
+            let outcome = inner.expect("cancelled helper should finish before timeout");
+            let err = outcome.expect_err("lock acquisition should honor inherited cancellation");
+            assert!(
+                err.to_string().contains("session lock failed"),
+                "unexpected error: {err}"
+            );
+
+            drop(held_guard);
+
+            let cx = Cx::for_request();
+            let guard = session.lock(&cx).await.expect("lock session");
+            assert_eq!(guard.get_name(), None);
         });
     }
 

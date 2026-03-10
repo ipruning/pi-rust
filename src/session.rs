@@ -66,7 +66,7 @@ pub struct SessionHandle(pub Arc<Mutex<Session>>);
 #[async_trait]
 impl ExtensionSession for SessionHandle {
     async fn get_state(&self) -> Value {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return serde_json::json!({
                 "model": null,
@@ -128,7 +128,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn get_messages(&self) -> Vec<SessionMessage> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return Vec::new();
         };
@@ -152,7 +152,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn get_entries(&self) -> Vec<Value> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return Vec::new();
         };
@@ -164,7 +164,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn get_branch(&self) -> Vec<Value> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return Vec::new();
         };
@@ -176,7 +176,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn set_name(&self, name: String) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -187,7 +187,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn append_message(&self, message: SessionMessage) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -198,7 +198,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn append_custom_entry(&self, custom_type: String, data: Option<Value>) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -212,7 +212,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn set_model(&self, provider: String, model_id: String) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -228,7 +228,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn get_model(&self) -> (Option<String>, Option<String>) {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return (None, None);
         };
@@ -239,7 +239,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn set_thinking_level(&self, level: String) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -254,7 +254,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn get_thinking_level(&self) -> Option<String> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let Ok(session) = self.0.lock(cx.cx()).await else {
             return None;
         };
@@ -262,7 +262,7 @@ impl ExtensionSession for SessionHandle {
     }
 
     async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
-        let cx = AgentCx::for_request();
+        let cx = AgentCx::for_current_or_request();
         let mut session = self
             .0
             .lock(cx.cx())
@@ -575,6 +575,7 @@ impl AutosaveQueue {
 
 /// A session manages conversation state and persistence.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Session {
     /// Session header
     pub header: SessionHeader,
@@ -4594,6 +4595,7 @@ mod tests {
     use asupersync::runtime::RuntimeBuilder;
     use clap::Parser;
     use std::future::Future;
+    use std::time::Duration;
 
     fn make_test_message(text: &str) -> SessionMessage {
         SessionMessage::User {
@@ -4953,6 +4955,45 @@ mod tests {
         let (provider, model_id) = run_async(async { handle.get_model().await });
         assert_eq!(provider.as_deref(), Some("prov"));
         assert_eq!(model_id.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn session_handle_set_name_inherits_cancelled_context_when_lock_is_held() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let handle = SessionHandle(Arc::clone(&session));
+
+            let hold_cx = AgentCx::for_request();
+            let held_guard = session.lock(hold_cx.cx()).await.expect("lock session");
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+            let inner = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                Duration::from_millis(100),
+                handle.set_name("cancelled-name".to_string()),
+            )
+            .await;
+            let outcome = inner.expect("cancelled helper should finish before timeout");
+            let err = outcome.expect_err("lock acquisition should honor inherited cancellation");
+            assert!(
+                err.to_string().contains("Failed to lock session"),
+                "unexpected error: {err}"
+            );
+
+            drop(held_guard);
+
+            let state = SessionHandle(Arc::clone(&session)).get_state().await;
+            assert!(
+                state.get("sessionName").is_none_or(Value::is_null),
+                "cancelled mutation should not update the session name: {state:?}"
+            );
+        });
     }
 
     #[test]
