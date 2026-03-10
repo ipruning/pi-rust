@@ -510,6 +510,52 @@ fn post_multiple_writes_joined() {
     assert_eq!(result, "part1part2part3");
 }
 
+#[test]
+fn post_buffer_write_sends_body_bytes_via_hostcall() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: req.body_bytes || "" });"#,
+        r"
+        const req = http.request({
+            hostname: 'example.com',
+            path: '/upload',
+            method: 'POST'
+        }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                resolve({ result: body });
+            });
+        });
+        req.write(Buffer.from([0, 255, 65]));
+        req.end();
+        ",
+    );
+    assert_eq!(result, "AP9B");
+}
+
+#[test]
+fn post_typed_array_write_sends_body_bytes_via_hostcall() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body: req.body_bytes || "" });"#,
+        r"
+        const req = http.request({
+            hostname: 'example.com',
+            path: '/upload',
+            method: 'POST'
+        }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                resolve({ result: body });
+            });
+        });
+        req.write(new Uint8Array([104, 105]));
+        req.end();
+        ",
+    );
+    assert_eq!(result, "aGk=");
+}
+
 // ─── URL construction ───────────────────────────────────────────────────────
 
 #[test]
@@ -676,6 +722,27 @@ fn response_empty_body_emits_end_without_data() {
         "#,
     );
     assert_eq!(result, "end");
+}
+
+#[test]
+fn response_body_bytes_emits_binary_chunk() {
+    let result = eval_http_mock(
+        r#"return Promise.resolve({ status: 200, headers: {}, body_bytes: "AP9B" });"#,
+        r#"
+        http.get("http://example.com/binary", (res) => {
+            let sawBuffer = false;
+            let bytes = '';
+            res.on('data', (chunk) => {
+                sawBuffer = typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk);
+                bytes = Array.from(chunk).join(',');
+            });
+            res.on('end', () => {
+                resolve({ result: String(sawBuffer) + "|" + bytes });
+            });
+        });
+        "#,
+    );
+    assert_eq!(result, "true|0,255,65");
 }
 
 // ─── Timeout option ─────────────────────────────────────────────────────────

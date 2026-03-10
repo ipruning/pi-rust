@@ -529,6 +529,9 @@ impl PiApp {
                 self.abort_handle = None;
                 self.status_message = status;
                 self.message_render_cache.clear();
+                if let Err(message) = self.sync_runtime_selection_from_session_header() {
+                    self.status_message = Some(message);
+                }
                 self.scroll_to_bottom();
                 self.input.focus();
             }
@@ -2050,6 +2053,52 @@ mod stream_delta_batcher_tests {
         assert!(
             !state.saw_user_message.load(Ordering::SeqCst),
             "continue path should not synthesize a user message"
+        );
+    }
+
+    #[test]
+    fn conversation_reset_syncs_runtime_model_and_thinking_from_session_header() {
+        let (mut app, _event_rx) = build_test_app_with_provider(Arc::new(DummyProvider));
+        let mut next = model_entry("openai", "gpt-4o");
+        next.model.reasoning = false;
+        app.available_models.push(next.clone());
+
+        runtime().block_on(async {
+            let cx = Cx::for_request();
+            let mut session_guard =
+                asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&app.session), &cx)
+                    .await
+                    .expect("lock session");
+            session_guard.header.provider = Some(next.model.provider.clone());
+            session_guard.header.model_id = Some(next.model.id.clone());
+            session_guard.header.thinking_level = Some("high".to_string());
+        });
+
+        let _ = app.handle_pi_message(PiMsg::ConversationReset {
+            messages: Vec::new(),
+            usage: Usage::default(),
+            status: Some("Session resumed".to_string()),
+        });
+
+        assert_eq!(app.model, "openai/gpt-4o");
+        assert_eq!(app.model_entry.model.provider, "openai");
+        assert_eq!(app.model_entry.model.id, "gpt-4o");
+        assert_eq!(app.status_message.as_deref(), Some("Session resumed"));
+
+        let shared = app
+            .model_entry_shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(shared.model.provider, "openai");
+        assert_eq!(shared.model.id, "gpt-4o");
+        drop(shared);
+
+        let agent_guard = app.agent.try_lock().expect("lock agent");
+        assert_eq!(agent_guard.provider().name(), "openai");
+        assert_eq!(agent_guard.provider().model_id(), "gpt-4o");
+        assert_eq!(
+            agent_guard.stream_options().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
         );
     }
 

@@ -4150,18 +4150,20 @@ async fn cycle_model_for_rpc(
             &runtime_model_id,
             options,
         )
-        .map(|entry| {
-            (
-                Some(entry.model.provider.clone()),
-                Some(entry.model.id.clone()),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                inner_session.header.provider.clone(),
-                inner_session.header.model_id.clone(),
-            )
-        })
+        .map_or_else(
+            || {
+                (
+                    inner_session.header.provider.clone(),
+                    inner_session.header.model_id.clone(),
+                )
+            },
+            |entry| {
+                (
+                    Some(entry.model.provider.clone()),
+                    Some(entry.model.id.clone()),
+                )
+            },
+        )
     };
 
     let current_index = candidates.iter().position(|entry| {
@@ -5562,7 +5564,7 @@ export default function init(pi) {
     fn current_or_runtime_model_entry_falls_back_when_header_is_unresolved() {
         let mut runtime = dummy_entry("test-model", false);
         runtime.model.provider = "test-provider".to_string();
-        let options = rpc_options_with_models(vec![runtime.clone()]);
+        let options = rpc_options_with_models(vec![runtime]);
 
         let mut session = Session::in_memory();
         session.header.provider = Some("missing-provider".to_string());

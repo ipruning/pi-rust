@@ -24,6 +24,67 @@ const METHODS = [
   'OPTIONS', 'TRACE', 'PATCH',
 ];
 
+function __pi_http_is_binary_chunk(chunk) {
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(chunk)) {
+    return true;
+  }
+  if (chunk instanceof Uint8Array || chunk instanceof ArrayBuffer) {
+    return true;
+  }
+  return !!(ArrayBuffer.isView && ArrayBuffer.isView(chunk));
+}
+
+function __pi_http_to_uint8(chunk) {
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  if (chunk instanceof Uint8Array) {
+    return chunk;
+  }
+  if (chunk instanceof ArrayBuffer) {
+    return new Uint8Array(chunk);
+  }
+  if (ArrayBuffer.isView && ArrayBuffer.isView(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  return new TextEncoder().encode(String(chunk ?? ''));
+}
+
+function __pi_http_chunks_to_base64(chunks) {
+  const parts = chunks.map((chunk) => __pi_http_to_uint8(chunk));
+  const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const merged =
+    typeof Buffer !== 'undefined' && typeof Buffer.alloc === 'function'
+      ? Buffer.alloc(total)
+      : new Uint8Array(total);
+
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+
+  let binary = '';
+  for (let i = 0; i < merged.length; i++) {
+    binary += String.fromCharCode(merged[i]);
+  }
+  return globalThis.__pi_base64_encode_native(binary);
+}
+
+function __pi_http_decode_body_bytes(bodyBytes) {
+  const encoded = String(bodyBytes ?? '');
+  const binary = globalThis.__pi_base64_decode_native(encoded);
+  const out =
+    typeof Buffer !== 'undefined' && typeof Buffer.alloc === 'function'
+      ? Buffer.alloc(binary.length)
+      : new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i) & 0xff;
+  }
+  return out;
+}
+
 // ─── IncomingMessage ─────────────────────────────────────────────────────────
 
 class IncomingMessage extends EventEmitter {
@@ -73,7 +134,7 @@ class ClientRequest extends EventEmitter {
 
   write(chunk) {
     if (!this._ended && !this._aborted) {
-      this._body.push(typeof chunk === 'string' ? chunk : String(chunk));
+      this._body.push(__pi_http_is_binary_chunk(chunk) ? __pi_http_to_uint8(chunk) : String(chunk));
     }
     return true;
   }
@@ -130,11 +191,16 @@ class ClientRequest extends EventEmitter {
       }
     }
 
-    const body = this._body.length > 0 ? this._body.join('') : undefined;
     const method = (opts.method || 'GET').toUpperCase();
-
     const request = { url, method, headers };
-    if (body) request.body = body;
+    if (this._body.length > 0) {
+      const hasBinaryChunk = this._body.some((chunk) => __pi_http_is_binary_chunk(chunk));
+      if (hasBinaryChunk) {
+        request.body_bytes = __pi_http_chunks_to_base64(this._body);
+      } else {
+        request.body = this._body.join('');
+      }
+    }
     if (this._timeoutMs) request.timeout = this._timeoutMs;
 
     // Use pi.http() hostcall if available
@@ -168,7 +234,10 @@ class ClientRequest extends EventEmitter {
 
     const statusCode = result.status || result.statusCode || 200;
     const headers = result.headers || {};
-    const body = result.body || result.data || '';
+    const body =
+      result.body_bytes !== undefined && result.body_bytes !== null
+        ? __pi_http_decode_body_bytes(result.body_bytes)
+        : (result.body || result.data || '');
 
     const res = new IncomingMessage(statusCode, headers, body);
     this.emit('response', res);
