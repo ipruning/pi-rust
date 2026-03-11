@@ -397,3 +397,24 @@ Coverage gaps worth filling as code lands:
 7. `bd-xdcrh.4.3`: only revisit subprocess pipe pumps if measured evidence says the current thread model is a real problem.
 8. `bd-xdcrh.5`: land deterministic tests alongside each slice instead of saving them for the end.
 9. `bd-xdcrh.6` and `bd-xdcrh.6.1`: only escalate to broader supervision/AppSpec work if lifecycle hazards remain after the narrow fixes above.
+
+## `bd-xdcrh.6.2` Supervision / AppSpec Decision
+
+- Recommendation: `defer` broad supervision or AppSpec adoption
+- Why this is the right call now:
+  - Pi already has a usable ownership spine: `src/main.rs` owns the multi-thread `asupersync` runtime, then threads a runtime handle into `AgentSession`, which already concentrates per-session ownership for provider state, session state, extension region, and background compaction.
+  - The highest-value worker-island fix already landed in `bd-xdcrh.4.2`, so background compaction is no longer evidence that Pi lacks runtime ownership.
+  - The remaining lifecycle edges are mode-specific bridge boundaries, especially interactive and RPC handoff points plus the explicit `ExtensionRegion::shutdown()` contract, not a missing repo-wide supervision framework.
+  - The known raw-thread islands are still intentional. RPC stdio loops and subprocess pipe pumps are tied to hard blocking I/O and descendant-pipe behavior where a dedicated thread remains simpler and safer than a generic AppSpec-shaped abstraction.
+- What to keep doing instead:
+  - make shutdown edges explicit where async work crosses UI or blocking boundaries
+  - preserve the existing `main` -> `AgentSession` -> mode-bridge ownership model
+  - treat dedicated blocking threads as guilty only if measured failures appear, not because they are aesthetically out of style
+- Non-goals:
+  - do not introduce a new top-level supervision tree just to mirror `asupersync` concepts more visibly
+  - do not wrap existing interactive or RPC flows in a broad AppSpec layer without a concrete failure mode to solve
+  - do not use this bead to reopen already-closed worker-lifecycle decisions such as compaction runtime ownership
+- Revisit only if new evidence appears:
+  - bridge tasks demonstrably outlive their owning mode and cannot be fixed with a local shutdown or abort contract
+  - explicit extension shutdown becomes unmanageable across more than one narrow boundary
+  - raw-thread islands show measured shutdown hangs, orphan work, or thread proliferation that runtime-owned structure would clearly improve
