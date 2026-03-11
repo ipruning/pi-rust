@@ -10171,6 +10171,14 @@ fn fs_op_read(params: &Value, path: &Path) -> std::result::Result<Value, HostCal
         .map_or("utf8", str::trim);
 
     if let Ok(meta) = fs::metadata(path) {
+        if !meta.is_file() {
+            return Err(HostCallError {
+                code: HostCallErrorCode::InvalidRequest,
+                message: format!("Path {} is not a regular file", path.display()),
+                details: None,
+                retryable: None,
+            });
+        }
         if meta.len() > crate::tools::READ_TOOL_MAX_BYTES {
             return Err(HostCallError {
                 code: HostCallErrorCode::Io,
