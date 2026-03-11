@@ -1892,6 +1892,14 @@ pub(crate) async fn run_bash_command(
 
     let (tx, mut rx) = mpsc::sync_channel::<Vec<u8>>(128);
     let tx_stdout = tx.clone();
+
+    // Design Decision (bd-xdcrh.4.3):
+    // We intentionally use raw dedicated OS threads here rather than `asupersync::runtime::spawn_blocking`.
+    // The `pump_stream` loop blocks indefinitely on `read()` until the subprocess closes the pipe (EOF).
+    // If we used the runtime's blocking pool, concurrently running long-lived bash tools (like compilers
+    // or servers) could easily exhaust the pool's thread limit, starving the rest of the application
+    // of threads needed for short-lived blocking I/O (e.g., SQLite transactions or filesystem metadata).
+    // Dedicated threads cleanly isolate this unbounded blocking risk.
     thread::spawn(move || pump_stream(stdout, &tx_stdout));
     thread::spawn(move || pump_stream(stderr, &tx));
 
