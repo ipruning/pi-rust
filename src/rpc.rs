@@ -998,9 +998,7 @@ pub async fn run(
                         .thinking_level
                         .unwrap_or_default();
                     let clamped = entry.clamp_thinking_level(current_thinking);
-                    if clamped != current_thinking {
-                        apply_thinking_level(&mut guard, clamped).await?;
-                    }
+                    apply_thinking_level(&mut guard, clamped).await?;
                     Ok(())
                 }
                 .await;
@@ -4371,6 +4369,20 @@ fn parse_thinking_level(level: &str) -> Result<crate::model::ThinkingLevel> {
     level.parse().map_err(|err: String| Error::validation(err))
 }
 
+fn session_thinking_level(
+    session: &crate::session::Session,
+) -> Option<crate::model::ThinkingLevel> {
+    session.header.thinking_level.as_deref().and_then(|raw| {
+        raw.parse::<crate::model::ThinkingLevel>().map_or_else(
+            |_| {
+                tracing::warn!("Ignoring invalid session thinking level in RPC state: {raw}");
+                None
+            },
+            Some,
+        )
+    })
+}
+
 fn current_model_entry<'a>(
     session: &crate::session::Session,
     options: &'a RpcOptions,
@@ -4405,14 +4417,18 @@ async fn apply_thinking_level(
     level: crate::model::ThinkingLevel,
 ) -> Result<()> {
     let cx = AgentCx::for_current_or_request();
+    let level_str = level.to_string();
     {
         let mut inner_session = guard
             .session
             .lock(cx.cx())
             .await
             .map_err(|err| Error::session(format!("inner session lock failed: {err}")))?;
-        inner_session.header.thinking_level = Some(level.to_string());
-        inner_session.append_thinking_level_change(level.to_string());
+        let previous = session_thinking_level(&inner_session);
+        inner_session.header.thinking_level = Some(level_str.clone());
+        if previous != Some(level) {
+            inner_session.append_thinking_level_change(level_str);
+        }
     }
     guard.agent.stream_options_mut().thinking_level = Some(level);
     guard.persist_session().await
@@ -6229,6 +6245,104 @@ export default function init(pi) {
                     .thinking_level
                     .is_none()
             );
+        });
+    }
+
+    #[test]
+    fn apply_thinking_level_canonicalizes_header_without_duplicate_history() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let mut session = Session::in_memory();
+            session.header.thinking_level = Some("HIGH".to_string());
+            let mut agent_session = build_test_agent_session(session);
+
+            apply_thinking_level(&mut agent_session, ThinkingLevel::High)
+                .await
+                .expect("apply thinking level");
+
+            let verify_cx = AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(verify_cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.thinking_level.as_deref(), Some("high"));
+            let thinking_changes = session
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_))
+                })
+                .count();
+            assert_eq!(thinking_changes, 0);
+            drop(session);
+
+            assert_eq!(
+                agent_session.agent.stream_options().thinking_level,
+                Some(ThinkingLevel::High)
+            );
+        });
+    }
+
+    #[test]
+    fn rpc_set_model_persists_clamped_thinking_header_even_when_runtime_is_already_off() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let mut next = dummy_entry("llama3.2", false);
+            next.model.provider = "ollama".to_string();
+            next.model.api = "openai-completions".to_string();
+            next.model.base_url = "http://127.0.0.1:11434/v1".to_string();
+
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("auth.json");
+            let mut options = build_test_rpc_options(&handle, auth_path);
+            options.available_models = vec![next.clone()];
+
+            let agent_session = build_test_agent_session(Session::in_memory());
+            let session_handle = Arc::clone(&agent_session.session);
+            let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(8);
+            let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+            let out_rx = Arc::new(Mutex::new(out_rx));
+
+            let server =
+                handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+
+            let response = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"1","type":"set_model","provider":"ollama","modelId":"llama3.2"}"#,
+                "set_model(sync-thinking)",
+            )
+            .await;
+            assert_ok(&response, "set_model");
+
+            drop(in_tx);
+            let result = server.await;
+            assert!(result.is_ok(), "rpc server error: {result:?}");
+
+            let verify_cx = AgentCx::for_request();
+            let session = session_handle
+                .lock(verify_cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("ollama"));
+            assert_eq!(session.header.model_id.as_deref(), Some("llama3.2"));
+            assert_eq!(session.header.thinking_level.as_deref(), Some("off"));
+            let thinking_changes = session
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_))
+                })
+                .count();
+            assert_eq!(thinking_changes, 1);
         });
     }
 

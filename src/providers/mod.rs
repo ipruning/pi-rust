@@ -1029,6 +1029,9 @@ pub fn normalize_openai_base(base_url: &str) -> String {
         return base_url.to_string();
     }
     let base_url = base_url.strip_suffix("/responses").unwrap_or(base_url);
+    if base_url.eq_ignore_ascii_case("https://api.openai.com") {
+        return "https://api.openai.com/v1/chat/completions".to_string();
+    }
     if base_url.ends_with("/v1") {
         return format!("{base_url}/chat/completions");
     }
@@ -1047,6 +1050,9 @@ pub fn normalize_openai_responses_base(base_url: &str) -> String {
     let base_url = base_url
         .strip_suffix("/chat/completions")
         .unwrap_or(base_url);
+    if base_url.eq_ignore_ascii_case("https://api.openai.com") {
+        return "https://api.openai.com/v1/responses".to_string();
+    }
     if base_url.ends_with("/v1") {
         return format!("{base_url}/responses");
     }
@@ -1080,6 +1086,9 @@ pub fn normalize_cohere_base(base_url: &str) -> String {
         return "https://api.cohere.com/v2/chat".to_string();
     }
     let base_url = trimmed.trim_end_matches('/');
+    if base_url.eq_ignore_ascii_case("https://api.cohere.com") {
+        return "https://api.cohere.com/v2/chat".to_string();
+    }
     if base_url.ends_with("/chat") {
         return base_url.to_string();
     }
@@ -2198,7 +2207,23 @@ export default function init(pi) {
     }
 
     #[test]
-    fn normalize_openai_base_bare_url_gets_chat_completions() {
+    fn normalize_openai_base_official_bare_url_gets_v1_chat_completions() {
+        assert_eq!(
+            normalize_openai_base("https://api.openai.com"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalize_openai_base_strips_non_v1_official_responses_suffix() {
+        assert_eq!(
+            normalize_openai_base("https://api.openai.com/responses"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalize_openai_base_custom_bare_url_gets_chat_completions() {
         assert_eq!(
             normalize_openai_base("https://my-llm-proxy.com"),
             "https://my-llm-proxy.com/chat/completions"
@@ -2248,7 +2273,23 @@ export default function init(pi) {
     }
 
     #[test]
-    fn normalize_responses_bare_url_gets_responses() {
+    fn normalize_responses_official_bare_url_gets_v1_responses() {
+        assert_eq!(
+            normalize_openai_responses_base("https://api.openai.com"),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn normalize_responses_strips_non_v1_official_chat_completions_suffix() {
+        assert_eq!(
+            normalize_openai_responses_base("https://api.openai.com/chat/completions"),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn normalize_responses_custom_bare_url_gets_responses() {
         assert_eq!(
             normalize_openai_responses_base("https://my-llm-proxy.com"),
             "https://my-llm-proxy.com/responses"
@@ -2290,7 +2331,15 @@ export default function init(pi) {
     }
 
     #[test]
-    fn normalize_cohere_bare_url_gets_chat() {
+    fn normalize_cohere_official_bare_url_gets_v2_chat() {
+        assert_eq!(
+            normalize_cohere_base("https://api.cohere.com"),
+            "https://api.cohere.com/v2/chat"
+        );
+    }
+
+    #[test]
+    fn normalize_cohere_custom_bare_url_gets_chat() {
         assert_eq!(
             normalize_cohere_base("https://custom-cohere.example.com"),
             "https://custom-cohere.example.com/chat"

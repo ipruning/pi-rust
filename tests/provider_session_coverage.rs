@@ -186,6 +186,15 @@ fn normalize_openai_base_appends_endpoint() {
             "https://api.openai.com/v1",
             "https://api.openai.com/v1/chat/completions",
         ),
+        // Bare official OpenAI origin gets /v1/chat/completions appended
+        (
+            "https://api.openai.com",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://api.openai.com/",
+            "https://api.openai.com/v1/chat/completions",
+        ),
         // Already has /chat/completions - kept as-is
         (
             "https://custom.api.com/v1/chat/completions",
@@ -233,6 +242,15 @@ fn normalize_openai_responses_base_appends_endpoint() {
             "https://api.openai.com/v1",
             "https://api.openai.com/v1/responses",
         ),
+        // Bare official OpenAI origin gets /v1/responses appended
+        (
+            "https://api.openai.com",
+            "https://api.openai.com/v1/responses",
+        ),
+        (
+            "https://api.openai.com/",
+            "https://api.openai.com/v1/responses",
+        ),
         // /chat/completions suffix stripped, then /responses appended
         (
             "https://api.openai.com/v1/chat/completions",
@@ -265,10 +283,10 @@ fn normalize_cohere_base_appends_endpoint() {
             "https://api.cohere.com/v2",
             "https://api.cohere.com/v2/chat",
         ),
-        // Bare URL gets /chat appended
-        ("https://api.cohere.com", "https://api.cohere.com/chat"),
-        // Trailing slash stripped, then /chat appended
-        ("https://api.cohere.com/", "https://api.cohere.com/chat"),
+        // Bare official Cohere origin gets /v2/chat appended
+        ("https://api.cohere.com", "https://api.cohere.com/v2/chat"),
+        // Trailing slash stripped, then /v2/chat appended
+        ("https://api.cohere.com/", "https://api.cohere.com/v2/chat"),
     ];
     for (input, expected) in &cases {
         let result = normalize_cohere_base(input);
