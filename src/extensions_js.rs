@@ -487,8 +487,7 @@ fn js_to_json_inner(value: &Value<'_>, depth: usize) -> rquickjs::Result<serde_j
     }
     if let Some(obj) = value.as_object() {
         let mut result = serde_json::Map::new();
-        let mut count = 0;
-        for item in obj.props::<String, Value<'_>>() {
+        for (count, item) in obj.props::<String, Value<'_>>().enumerate() {
             if count >= 100_000 {
                 return Err(rquickjs::Error::new_into_js_message(
                     "json",
@@ -496,7 +495,6 @@ fn js_to_json_inner(value: &Value<'_>, depth: usize) -> rquickjs::Result<serde_j
                     "Object properties count exceeds maximum allowed limit of 100,000",
                 ));
             }
-            count += 1;
             let (k, v) = item?;
             result.insert(k, js_to_json_inner(&v, depth + 1)?);
         }
@@ -5835,6 +5833,7 @@ fn prefix_import_meta_url(module_name: &str, body: &str) -> Vec<u8> {
     format!("import.meta.url = {url_literal};\n{body}").into_bytes()
 }
 
+#[allow(clippy::too_many_lines)]
 fn resolve_module_path(
     base: &str,
     specifier: &str,
@@ -5941,7 +5940,7 @@ fn resolve_module_path(
     // Pattern 1 (bd-k5q5.8.2): dist/ → src/ fallback for missing build artifacts.
     // Gated by repair_mode (bd-k5q5.9.1.2): only static-analysis operations
     // (path existence checks) happen here — broken code is never executed.
-    if repair_mode.should_apply() {
+    let fallback_resolved = if repair_mode.should_apply() {
         try_dist_to_src_fallback(&path)
     } else {
         if repair_mode == RepairMode::Suggest {
@@ -5957,7 +5956,27 @@ fn resolve_module_path(
             }
         }
         None
+    };
+
+    if let Some(resolved) = fallback_resolved {
+        let canonical_resolved = crate::extensions::safe_canonicalize(&resolved);
+        let allowed = canonical_roots
+            .iter()
+            .any(|canonical_root| canonical_resolved.starts_with(canonical_root));
+
+        if !allowed {
+            tracing::warn!(
+                event = "pijs.resolve.monotonicity_violation",
+                original = %path.display(),
+                resolved = %resolved.display(),
+                "resolution blocked: repaired path escapes extension root"
+            );
+            return None;
+        }
+        return Some(resolved);
     }
+
+    None
 }
 
 /// Auto-repair Pattern 1: when a module path contains `/dist/` and the file

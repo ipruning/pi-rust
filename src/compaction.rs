@@ -294,6 +294,16 @@ fn estimate_context_tokens(messages: &[SessionMessage]) -> ContextUsageEstimate 
     };
 
     let usage_tokens = calculate_context_tokens(usage);
+    
+    // Fall back to heuristic estimation if the provider didn't return usage metrics
+    if usage_tokens == 0 {
+        let total = messages.iter().map(estimate_tokens).sum();
+        return ContextUsageEstimate {
+            tokens: total,
+            last_usage_index: None,
+        };
+    }
+
     let trailing_tokens = messages[usage_index + 1..]
         .iter()
         .map(estimate_tokens)

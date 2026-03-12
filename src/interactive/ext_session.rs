@@ -224,8 +224,8 @@ impl ExtensionSession for InteractiveExtensionSession {
             "thinkingLevel": thinking_level,
             "isStreaming": self.is_streaming.load(Ordering::SeqCst),
             "isCompacting": self.is_compacting.load(Ordering::SeqCst),
-            "steeringMode": "one-at-a-time",
-            "followUpMode": "one-at-a-time",
+            "steeringMode": self.config.steering_queue_mode().as_str(),
+            "followUpMode": self.config.follow_up_queue_mode().as_str(),
             "sessionFile": session_file,
             "sessionId": session_id,
             "sessionName": session_name,
@@ -942,6 +942,33 @@ mod tests {
                 .filter(|entry| matches!(entry, crate::session::SessionEntry::ModelChange(_)))
                 .count();
             assert_eq!(model_changes, 1);
+        });
+    }
+
+    #[test]
+    fn get_state_reports_configured_queue_modes() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let ext_session = InteractiveExtensionSession {
+                session,
+                model_entry: Arc::new(StdMutex::new(dummy_model_entry())),
+                is_streaming: Arc::new(AtomicBool::new(false)),
+                is_compacting: Arc::new(AtomicBool::new(false)),
+                config: Config {
+                    steering_mode: Some("all".to_string()),
+                    follow_up_mode: Some("one-at-a-time".to_string()),
+                    ..Config::default()
+                },
+                save_enabled: false,
+            };
+
+            let state = ext_session.get_state().await;
+            assert_eq!(state["steeringMode"], "all");
+            assert_eq!(state["followUpMode"], "one-at-a-time");
         });
     }
 }
