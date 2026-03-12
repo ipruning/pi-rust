@@ -1,7 +1,7 @@
 {
   "schema": "pi.e2e.replay_bundle.v1",
-  "generated_at": "2026-03-04T20:22:47.177Z",
-  "correlation_id": "replay-bundle-20260304T202247Z",
+  "generated_at": "2026-03-12T02:16:21.131Z",
+  "correlation_id": "replay-bundle-20260312T021621Z",
   "source_summary_path": "tests/full_suite_gate/full_suite_verdict.json",
   "one_command_replay": "cargo test --test ci_full_suite_gate -- full_suite_gate --nocapture --exact",
   "environment": {
@@ -12,7 +12,7 @@
     "rustc_version": "rustc 1.95.0-nightly (7f99507f5 2026-02-19)",
     "cargo_target_dir": "target",
     "vcr_mode": "unset",
-    "git_sha": "ac8999ab",
+    "git_sha": "77a44af4",
     "git_branch": "main",
     "os": "linux"
   },

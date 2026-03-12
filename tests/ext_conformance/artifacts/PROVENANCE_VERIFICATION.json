@@ -1,12 +1,12 @@
 {
   "schema": "pi.ext.provenance_verification.v1",
-  "generated_at": "2026-03-03T22:04:59.822742342+00:00",
+  "generated_at": "2026-03-12T02:18:59.265290132+00:00",
   "summary": {
     "total_artifacts": 208,
-    "verified_ok": 203,
-    "failed": 5,
+    "verified_ok": 201,
+    "failed": 7,
     "exceptions": 0,
-    "pass_rate": 0.9759615384615384
+    "pass_rate": 0.9663461538461539
   },
   "artifacts": [
     {
@@ -1250,14 +1250,17 @@
         "directory_exists": true,
         "id_naming_valid": true,
         "directory_layout_valid": true,
-        "on_disk_checksum": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
+        "on_disk_checksum": "f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389",
         "master_catalog_checksum": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
         "provenance_checksum": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
-        "checksums_consistent": true,
+        "checksums_consistent": false,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "PASS"
+      "verdict": "FAIL",
+      "errors": [
+        "checksum_mismatch: disk=f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389, master=5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a, provenance=5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a"
+      ]
     },
     {
       "id": "dynamic-resources",
@@ -1760,14 +1763,17 @@
         "directory_exists": true,
         "id_naming_valid": true,
         "directory_layout_valid": true,
-        "on_disk_checksum": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
+        "on_disk_checksum": "684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379",
         "master_catalog_checksum": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
         "provenance_checksum": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
-        "checksums_consistent": true,
+        "checksums_consistent": false,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "PASS"
+      "verdict": "FAIL",
+      "errors": [
+        "checksum_mismatch: disk=684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379, master=4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c, provenance=4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c"
+      ]
     },
     {
       "id": "npm/marckrenn-pi-sub-core",

@@ -1,1 +1,1 @@
-{"data":{"early_avg_us":400,"history_messages":200,"late_avg_us":305,"prefix_valid":true,"ratio":0.7625,"streaming_buffer_len":440,"tokens_streamed":50},"event":"streaming_performance","schema":"pi.test.perf_event.v1","test":"tui_perf_e2e_streaming_with_history"}
+{"data":{"early_avg_us":299,"history_messages":200,"late_avg_us":307,"prefix_valid":true,"ratio":1.0267558528428093,"streaming_buffer_len":440,"tokens_streamed":50},"event":"streaming_performance","schema":"pi.test.perf_event.v1","test":"tui_perf_e2e_streaming_with_history"}

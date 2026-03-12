@@ -1,7 +1,7 @@
 # Final QA Certification Report
 
 **Schema**: pi.qa.final_certification.v1
-**Generated**: 2026-03-03T22:07:40Z
+**Generated**: 2026-03-12T02:21:56Z
 **Certification Verdict**: FAIL
 
 ## Evidence Gates

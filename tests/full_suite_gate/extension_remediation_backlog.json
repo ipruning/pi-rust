@@ -1,6 +1,6 @@
 {
   "schema": "pi.qa.extension_remediation_backlog.v1",
-  "generated_at": "2026-03-03T22:07:40.218Z",
+  "generated_at": "2026-03-12T02:21:56.103Z",
   "source_inputs": {
     "certification_dossier": "tests/full_suite_gate/certification_dossier.json",
     "certification_verdict": "tests/full_suite_gate/certification_verdict.json",

@@ -1,6 +1,6 @@
 {
   "schema": "pi.qa.final_certification.v1",
-  "generated_at": "2026-03-03T22:07:40Z",
+  "generated_at": "2026-03-12T02:21:56Z",
   "certification_verdict": "FAIL",
   "evidence": [
     {
@@ -17,7 +17,7 @@
       "status": "PASS",
       "detail": "E2E conformance: 60/224 extensions tested",
       "artifact_path": "tests/ext_conformance/reports/conformance_summary.json",
-      "artifact_sha256": "content-hash-5a982977b3d47e59-len-1058"
+      "artifact_sha256": "content-hash-7e3d37e9d31ce5dc-len-1058"
     },
     {
       "gate": "must_pass_208",
@@ -33,7 +33,7 @@
       "status": "FAIL",
       "detail": "Evidence bundle incomplete or missing (insufficient, artifacts=1553)",
       "artifact_path": "tests/evidence_bundle/index.json",
-      "artifact_sha256": "content-hash-53d0462f753c221d-len-11059"
+      "artifact_sha256": "content-hash-0a1ccb19f2618290-len-11059"
     },
     {
       "gate": "cross_platform",
@@ -41,7 +41,7 @@
       "status": "PASS",
       "detail": "10/10 platform checks pass",
       "artifact_path": "tests/cross_platform_reports/linux/platform_report.json",
-      "artifact_sha256": "content-hash-7beb0d4f17c4d8f0-len-4205"
+      "artifact_sha256": "content-hash-f552f9894ead41f8-len-4205"
     },
     {
       "gate": "full_suite_gate",
@@ -49,7 +49,7 @@
       "status": "WARN",
       "detail": "18/0 gates pass (fail)",
       "artifact_path": "tests/full_suite_gate/full_suite_verdict.json",
-      "artifact_sha256": "content-hash-345363cb218c3330-len-8038"
+      "artifact_sha256": "content-hash-69f98712e4d8c253-len-8038"
     },
     {
       "gate": "extension_remediation_backlog",
@@ -57,7 +57,7 @@
       "status": "PASS",
       "detail": "Remediation backlog valid: 36 entries (31 actionable, 5 non-actionable)",
       "artifact_path": "tests/full_suite_gate/extension_remediation_backlog.json",
-      "artifact_sha256": "content-hash-632b5b6175a4b87a-len-56760"
+      "artifact_sha256": "content-hash-a73009fc570850e6-len-56760"
     },
     {
       "gate": "practical_finish_checkpoint",
@@ -65,7 +65,7 @@
       "status": "PASS",
       "detail": "Practical-finish checkpoint satisfied: 0 docs/report residual issue(s)",
       "artifact_path": "tests/full_suite_gate/practical_finish_checkpoint.json",
-      "artifact_sha256": "content-hash-b52b367dd5f2ec26-len-436"
+      "artifact_sha256": "content-hash-146bc056ebf70c58-len-436"
     },
     {
       "gate": "parameter_sweeps_integrity",

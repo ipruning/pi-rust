@@ -170,7 +170,7 @@
     {
       "budget_name": null,
       "contract_id": "missing_or_stale_e2e_matrix_evidence",
-      "detail": "all candidate artifacts are stale/invalid (>24.00h): /data/projects/pi_agent_rust/tests/perf/reports/extension_benchmark_stratification.json (355.02h old)",
+      "detail": "all candidate artifacts are stale/invalid (>24.00h): /data/projects/pi_agent_rust/tests/perf/reports/extension_benchmark_stratification.json (551.26h old)",
       "remediation": "Generate fresh extension_benchmark_stratification.json in the current perf run."
     },
     {
@@ -180,7 +180,7 @@
       "remediation": "Generate fresh phase1_matrix_validation.json in the current perf run."
     }
   ],
-  "generated_at": "2026-03-03T22:06:42.934679063+00:00",
+  "generated_at": "2026-03-12T02:21:00.468017678+00:00",
   "no_data": 9,
   "pass": 4,
   "schema": "pi.perf.budget_summary.v1",

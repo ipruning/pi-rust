@@ -3663,26 +3663,18 @@
       "entry_path": "npm/marckrenn-pi-sub-bar/index.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
         "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
           "model_select",
-          "session_branch",
           "session_shutdown",
           "session_start",
-          "session_switch",
-          "sub-core:action",
           "sub-core:ready",
-          "sub-core:request",
-          "sub-core:settings:patch",
           "sub-core:settings:updated",
           "sub-core:update-all",
-          "sub-core:update-current",
-          "tool_result",
-          "turn_end",
-          "turn_start"
+          "sub-core:update-current"
         ],
         "uses_exec": true,
         "uses_http": false,
@@ -3699,26 +3691,17 @@
         "tools": [],
         "commands": [
           "sub-bar:import",
-          "sub-bar:settings",
-          "sub-core:settings"
+          "sub-bar:settings"
         ],
         "flags": [],
         "event_handlers": [
           "model_select",
-          "session_branch",
           "session_shutdown",
           "session_start",
-          "session_switch",
-          "sub-core:action",
           "sub-core:ready",
-          "sub-core:request",
-          "sub-core:settings:patch",
           "sub-core:settings:updated",
           "sub-core:update-all",
-          "sub-core:update-current",
-          "tool_result",
-          "turn_end",
-          "turn_start"
+          "sub-core:update-current"
         ]
       }
     },
@@ -4670,25 +4653,13 @@
       "entry_path": "npm/pi-package-test/extensions/confirm-destructive.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": true,
-        "registers_flags": true,
+        "registers_flags": false,
         "registers_providers": false,
         "subscribes_events": [
-          "agent_end",
-          "agent_start",
-          "before_agent_start",
-          "context",
-          "session_before_compact",
           "session_before_fork",
-          "session_before_switch",
-          "session_shutdown",
-          "session_start",
-          "session_switch",
-          "tool_call",
-          "tool_result",
-          "turn_end",
-          "turn_start"
+          "session_before_switch"
         ],
         "uses_exec": false,
         "uses_http": false,
@@ -4700,44 +4671,14 @@
       "conformance_tier": 3,
       "mock_requirements": [],
       "registrations": {
-        "tools": [
-          "signal_loop_success"
-        ],
+        "tools": [],
         "commands": [
-          "cost",
-          "flicker-corp",
-          "footer",
-          "fun-working",
-          "handoff",
-          "loop",
-          "mem",
-          "oracle",
-          "plan",
-          "remember",
-          "signature-flicker",
-          "speedread",
-          "status",
-          "status-refresh",
-          "todos",
-          "ultrathink",
-          "usage"
+          "footer"
         ],
         "flags": [],
         "event_handlers": [
-          "agent_end",
-          "agent_start",
-          "before_agent_start",
-          "context",
-          "session_before_compact",
           "session_before_fork",
-          "session_before_switch",
-          "session_shutdown",
-          "session_start",
-          "session_switch",
-          "tool_call",
-          "tool_result",
-          "turn_end",
-          "turn_start"
+          "session_before_switch"
         ]
       }
     },

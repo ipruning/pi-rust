@@ -1,6 +1,6 @@
 {
   "schema": "pi.ext.risk_review.v1",
-  "generated_at": "2026-03-03T22:05:00.423321384+00:00",
+  "generated_at": "2026-03-12T02:18:59.858720668+00:00",
   "summary": {
     "total_artifacts": 208,
     "license_clear": 179,
@@ -1242,7 +1242,6 @@
       "redistributable": "yes",
       "security_severity": "info",
       "security_findings": [
-        "[Info] child_process: Uses child_process module (common in extensions)",
         "[Info] .env: References .env files",
         "[Info] Buffer.from(: Binary buffer operations"
       ],
