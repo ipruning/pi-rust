@@ -406,9 +406,12 @@ impl PiApp {
                     .await
                     .unwrap_or(false);
                 if cancelled {
-                    let _ = crate::interactive::enqueue_pi_event(&event_tx, &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request), PiMsg::System(
-                        "Session switch cancelled by extension".to_string(),
-                    )).await;
+                    let _ = crate::interactive::enqueue_pi_event(
+                        &event_tx,
+                        &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request),
+                        PiMsg::System("Session switch cancelled by extension".to_string()),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -429,8 +432,12 @@ impl PiApp {
                 {
                     Ok(summary) => summary,
                     Err(err) => {
-                        let _ = event_tx
-                            .try_send(PiMsg::AgentError(format!("Branch summary failed: {err}")));
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::AgentError(format!("Branch summary failed: {err}")),
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -442,17 +449,24 @@ impl PiApp {
                 let mut guard = match session.lock(&cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = event_tx
-                            .try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::AgentError(format!("Failed to lock session: {err}")),
+                        )
+                        .await;
                         return;
                     }
                 };
 
                 if let Some(target_id) = &pending.new_leaf_id {
                     if !guard.navigate_to(target_id) {
-                        let _ = crate::interactive::enqueue_pi_event(&event_tx, &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request), PiMsg::AgentError(format!(
-                            "Branch target not found: {target_id}"
-                        ))).await;
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request),
+                            PiMsg::AgentError(format!("Branch target not found: {target_id}")),
+                        )
+                        .await;
                         return;
                     }
                 } else {
@@ -476,8 +490,12 @@ impl PiApp {
                 let mut agent_guard = match agent.lock(&cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = event_tx
-                            .try_send(PiMsg::AgentError(format!("Failed to lock agent: {err}")));
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::AgentError(format!("Failed to lock agent: {err}")),
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -488,8 +506,12 @@ impl PiApp {
                 let guard = match session.lock(&cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
-                        let _ = event_tx
-                            .try_send(PiMsg::AgentError(format!("Failed to lock session: {err}")));
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::AgentError(format!("Failed to lock session: {err}")),
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -504,14 +526,24 @@ impl PiApp {
                 Some(format!("Switched to {to_id_for_event}"))
             };
 
-            let _ = crate::interactive::enqueue_pi_event(&event_tx, &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request), PiMsg::ConversationReset {
-                messages,
-                usage,
-                status,
-            }).await;
+            let _ = crate::interactive::enqueue_pi_event(
+                &event_tx,
+                &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request),
+                PiMsg::ConversationReset {
+                    messages,
+                    usage,
+                    status,
+                },
+            )
+            .await;
 
             if let Some(text) = pending.editor_text {
-                let _ = crate::interactive::enqueue_pi_event(&event_tx, &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request), PiMsg::SetEditorText(text)).await;
+                let _ = crate::interactive::enqueue_pi_event(
+                    &event_tx,
+                    &asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request),
+                    PiMsg::SetEditorText(text),
+                )
+                .await;
             }
 
             if let Some(manager) = extensions {
