@@ -527,7 +527,7 @@ pub async fn discover_package_resources(manager: &PackageManager) -> Result<Pack
             continue;
         }
 
-        if let Some(pi) = read_pi_manifest(&root) {
+        if let Some(pi) = read_pi_manifest(&root)? {
             append_resources_from_manifest(&mut resources, &root, &pi);
         } else {
             append_resources_from_defaults(&mut resources, &root);
@@ -537,14 +537,31 @@ pub async fn discover_package_resources(manager: &PackageManager) -> Result<Pack
     Ok(resources)
 }
 
-fn read_pi_manifest(root: &Path) -> Option<Value> {
+fn read_pi_manifest(root: &Path) -> Result<Option<Value>> {
     let manifest_path = root.join("package.json");
     if !manifest_path.exists() {
-        return None;
+        return Ok(None);
     }
-    let raw = fs::read_to_string(&manifest_path).ok()?;
-    let json: Value = serde_json::from_str(&raw).ok()?;
-    json.get("pi").cloned()
+    let raw = fs::read_to_string(&manifest_path).map_err(|err| {
+        Error::config(format!(
+            "Failed to read package manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    let json: Value = serde_json::from_str(&raw).map_err(|err| {
+        Error::config(format!(
+            "Failed to parse package manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    match json.get("pi") {
+        Some(pi) if pi.is_object() => Ok(Some(pi.clone())),
+        Some(_) => Err(Error::config(format!(
+            "Invalid package manifest {}: `pi` must be an object",
+            manifest_path.display()
+        ))),
+        None => Ok(None),
+    }
 }
 
 fn append_resources_from_manifest(resources: &mut PackageResources, root: &Path, pi: &Value) {
@@ -3024,6 +3041,53 @@ still frontmatter",
         let re = regex::Regex::new(r"\d").unwrap();
         let result = replace_regex("a1b2c3", &re, |caps| format!("[{}]", &caps[0]));
         assert_eq!(result, "a[1]b[2]c[3]");
+    }
+
+    // ── package manifest parsing ──────────────────────────────────────
+
+    #[test]
+    fn test_read_pi_manifest_returns_none_when_package_json_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let pi = read_pi_manifest(tmp.path()).expect("missing package.json should not error");
+        assert!(pi.is_none());
+    }
+
+    #[test]
+    fn test_read_pi_manifest_errors_on_malformed_package_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("package.json");
+        fs::write(&manifest_path, "{ not valid json").expect("write malformed package.json");
+
+        let err = read_pi_manifest(tmp.path()).expect_err("malformed package.json must error");
+        let message = err.to_string();
+        assert!(message.contains("Failed to parse package manifest"));
+        assert!(message.contains(&manifest_path.display().to_string()));
+    }
+
+    #[test]
+    fn test_read_pi_manifest_errors_when_pi_field_is_not_object() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("package.json");
+        fs::write(&manifest_path, r#"{"name":"pkg","pi":"not-an-object"}"#)
+            .expect("write invalid pi manifest");
+
+        let err = read_pi_manifest(tmp.path()).expect_err("non-object `pi` field must error");
+        let message = err.to_string();
+        assert!(message.contains("Invalid package manifest"));
+        assert!(message.contains("`pi` must be an object"));
+        assert!(message.contains(&manifest_path.display().to_string()));
+    }
+
+    #[test]
+    fn test_read_pi_manifest_allows_default_fallback_when_pi_key_is_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("package.json");
+        fs::write(&manifest_path, r#"{"name":"pkg","version":"1.0.0"}"#)
+            .expect("write package.json");
+
+        let pi = read_pi_manifest(tmp.path()).expect("missing `pi` key should not error");
+        assert!(pi.is_none());
     }
 
     // ── load_skill_from_file with valid skill ──────────────────────────
