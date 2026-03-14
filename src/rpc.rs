@@ -343,12 +343,7 @@ struct RpcUiBridgeState {
     queue: VecDeque<ExtensionUiRequest>,
 }
 
-pub async fn run_stdio(mut session: AgentSession, options: RpcOptions) -> Result<()> {
-    session.agent.set_queue_modes(
-        options.config.steering_queue_mode(),
-        options.config.follow_up_queue_mode(),
-    );
-
+pub async fn run_stdio(session: AgentSession, options: RpcOptions) -> Result<()> {
     let (in_tx, in_rx) = mpsc::channel::<String>(1024);
     let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
 
@@ -423,6 +418,10 @@ pub async fn run(
             .lock(&cx)
             .await
             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+        guard.set_queue_modes(
+            options.config.steering_queue_mode(),
+            options.config.follow_up_queue_mode(),
+        );
         let steering_fetcher = move || -> BoxFuture<'static, Vec<Message>> {
             let steering_state = Arc::clone(&steering_state);
             let steering_cx = steering_cx.clone();
@@ -1174,12 +1173,20 @@ pub async fn run(
                     ));
                     continue;
                 };
-                let mut state = shared_state
+                let follow_up_mode = {
+                    let mut state = shared_state
+                        .lock(&cx)
+                        .await
+                        .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
+                    state.steering_mode = mode;
+                    state.follow_up_mode
+                };
+                let mut guard = session
                     .lock(&cx)
                     .await
-                    .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
-                state.steering_mode = mode;
-                drop(state);
+                    .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                guard.set_queue_modes(mode, follow_up_mode);
+                drop(guard);
                 let _ = out_tx.send(response_ok(id, "set_steering_mode", None));
             }
 
@@ -1200,12 +1207,20 @@ pub async fn run(
                     ));
                     continue;
                 };
-                let mut state = shared_state
+                let steering_mode = {
+                    let mut state = shared_state
+                        .lock(&cx)
+                        .await
+                        .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
+                    state.follow_up_mode = mode;
+                    state.steering_mode
+                };
+                let mut guard = session
                     .lock(&cx)
                     .await
-                    .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
-                state.follow_up_mode = mode;
-                drop(state);
+                    .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                guard.set_queue_modes(steering_mode, mode);
+                drop(guard);
                 let _ = out_tx.send(response_ok(id, "set_follow_up_mode", None));
             }
 
@@ -5074,6 +5089,42 @@ mod tests {
         }
     }
 
+    async fn wait_for_custom_message(
+        in_tx: &asupersync::channel::mpsc::Sender<String>,
+        out_rx: &Arc<Mutex<Receiver<String>>>,
+        custom_type: &str,
+        label: &str,
+    ) -> Value {
+        let start = Instant::now();
+        let mut attempt = 0usize;
+
+        loop {
+            let response = send_recv(
+                in_tx,
+                out_rx,
+                &format!(r#"{{"id":"poll-{attempt}","type":"get_messages"}}"#),
+                label,
+            )
+            .await;
+            let messages = response["data"]["messages"]
+                .as_array()
+                .expect("messages array");
+            if let Some(message) = messages
+                .iter()
+                .find(|message| message["role"] == "custom" && message["customType"] == custom_type)
+            {
+                return message.clone();
+            }
+
+            assert!(
+                start.elapsed() <= Duration::from_secs(10),
+                "{label}: timed out waiting for custom message"
+            );
+            attempt = attempt.saturating_add(1);
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(10)).await;
+        }
+    }
+
     const RPC_BUSY_EXTENSION_COMMAND_EXT: &str = r#"
 export default function init(pi) {
     pi.registerCommand("wait-confirm", {
@@ -5084,6 +5135,31 @@ export default function init(pi) {
                 message: "Hold the command open"
             });
             return confirmed ? "confirmed" : "cancelled";
+        }
+    });
+}
+"#;
+
+    const RPC_QUEUE_STATE_EXTENSION_EXT: &str = r#"
+export default function init(pi) {
+    pi.registerCommand("report-queue-state", {
+        description: "Report queue modes visible to extensions",
+        handler: async () => {
+            const state = await pi.session("getState", {});
+            await pi.events("sendMessage", {
+                message: {
+                    customType: "queue-state",
+                    content: JSON.stringify({
+                        steeringMode: state.steeringMode,
+                        followUpMode: state.followUpMode
+                    }),
+                    display: false
+                },
+                options: {
+                    triggerTurn: false
+                }
+            });
+            return "reported";
         }
     });
 }
@@ -5451,6 +5527,141 @@ export default function init(pi) {
             .to_string();
             let ui_resp = send_recv(&in_tx, &out_rx, &response, "wait-confirm response").await;
             assert_ok(&ui_resp, "extension_ui_response");
+
+            drop(in_tx);
+            let result = server.await;
+            assert!(result.is_ok(), "rpc server error: {result:?}");
+        });
+    }
+
+    #[test]
+    fn rpc_queue_mode_updates_reach_extension_session_state() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build test runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let cwd = temp.path().to_path_buf();
+            let ext_entry_path = cwd.join("queue-state-ext.mjs");
+            std::fs::write(&ext_entry_path, RPC_QUEUE_STATE_EXTENSION_EXT)
+                .expect("write extension source");
+
+            let mut agent_session = build_test_agent_session(Session::in_memory());
+            agent_session
+                .enable_extensions(&[], &cwd, None, &[ext_entry_path])
+                .await
+                .expect("enable extensions");
+
+            let options = build_test_rpc_options(&handle, cwd.join("auth.json"));
+            let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
+            let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+            let out_rx = Arc::new(Mutex::new(out_rx));
+
+            let server =
+                handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+
+            let steering = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"1","type":"set_steering_mode","mode":"all"}"#,
+                "set_steering_mode(queue-state)",
+            )
+            .await;
+            assert_ok(&steering, "set_steering_mode");
+
+            let follow_up = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"2","type":"setFollowUpMode","mode":"all"}"#,
+                "setFollowUpMode(queue-state)",
+            )
+            .await;
+            assert_ok(&follow_up, "set_follow_up_mode");
+
+            let prompt = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"3","type":"prompt","message":"/report-queue-state"}"#,
+                "prompt(report-queue-state)",
+            )
+            .await;
+            assert_ok(&prompt, "prompt");
+
+            let message =
+                wait_for_custom_message(&in_tx, &out_rx, "queue-state", "queue-state message")
+                    .await;
+            let reported_state: Value = serde_json::from_str(
+                message["content"]
+                    .as_str()
+                    .expect("queue-state content should be string"),
+            )
+            .expect("queue-state content should be json");
+            assert_eq!(reported_state["steeringMode"], "all");
+            assert_eq!(reported_state["followUpMode"], "all");
+
+            drop(in_tx);
+            let result = server.await;
+            assert!(result.is_ok(), "rpc server error: {result:?}");
+        });
+    }
+
+    #[test]
+    fn rpc_startup_queue_modes_reach_extension_session_state() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build test runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let cwd = temp.path().to_path_buf();
+            let ext_entry_path = cwd.join("queue-state-ext.mjs");
+            std::fs::write(&ext_entry_path, RPC_QUEUE_STATE_EXTENSION_EXT)
+                .expect("write extension source");
+
+            let mut agent_session = build_test_agent_session(Session::in_memory());
+            agent_session
+                .enable_extensions(&[], &cwd, None, &[ext_entry_path])
+                .await
+                .expect("enable extensions");
+
+            let mut options = build_test_rpc_options(&handle, cwd.join("auth.json"));
+            options.config.steering_mode = Some("all".to_string());
+            options.config.follow_up_mode = Some("all".to_string());
+
+            let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
+            let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+            let out_rx = Arc::new(Mutex::new(out_rx));
+
+            let server =
+                handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+
+            let prompt = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"1","type":"prompt","message":"/report-queue-state"}"#,
+                "prompt(report-queue-state-startup)",
+            )
+            .await;
+            assert_ok(&prompt, "prompt");
+
+            let message = wait_for_custom_message(
+                &in_tx,
+                &out_rx,
+                "queue-state",
+                "queue-state startup message",
+            )
+            .await;
+            let reported_state: Value = serde_json::from_str(
+                message["content"]
+                    .as_str()
+                    .expect("queue-state content should be string"),
+            )
+            .expect("queue-state content should be json");
+            assert_eq!(reported_state["steeringMode"], "all");
+            assert_eq!(reported_state["followUpMode"], "all");
 
             drop(in_tx);
             let result = server.await;

@@ -2149,6 +2149,8 @@ pub struct AgentSession {
     extensions_is_compacting: Arc<AtomicBool>,
     extensions_turn_active: Arc<AtomicBool>,
     extensions_pending_idle_actions: Arc<StdMutex<VecDeque<PendingIdleAction>>>,
+    extension_queue_modes: Option<Arc<StdMutex<ExtensionQueueModeState>>>,
+    extension_injected_queue: Option<Arc<StdMutex<ExtensionInjectedQueue>>>,
     compaction_settings: ResolvedCompactionSettings,
     compaction_runtime: Option<Runtime>,
     runtime_handle: Option<RuntimeHandle>,
@@ -2157,13 +2159,49 @@ pub struct AgentSession {
     auth_storage: Option<AuthStorage>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy)]
+struct ExtensionQueueModeState {
+    steering_mode: QueueMode,
+    follow_up_mode: QueueMode,
+}
+
+impl ExtensionQueueModeState {
+    const fn new(steering_mode: QueueMode, follow_up_mode: QueueMode) -> Self {
+        Self {
+            steering_mode,
+            follow_up_mode,
+        }
+    }
+
+    const fn set_modes(&mut self, steering_mode: QueueMode, follow_up_mode: QueueMode) {
+        self.steering_mode = steering_mode;
+        self.follow_up_mode = follow_up_mode;
+    }
+}
+
+#[derive(Debug)]
 struct ExtensionInjectedQueue {
     steering: VecDeque<Message>,
     follow_up: VecDeque<Message>,
+    steering_mode: QueueMode,
+    follow_up_mode: QueueMode,
 }
 
 impl ExtensionInjectedQueue {
+    const fn new(steering_mode: QueueMode, follow_up_mode: QueueMode) -> Self {
+        Self {
+            steering: VecDeque::new(),
+            follow_up: VecDeque::new(),
+            steering_mode,
+            follow_up_mode,
+        }
+    }
+
+    const fn set_modes(&mut self, steering_mode: QueueMode, follow_up_mode: QueueMode) {
+        self.steering_mode = steering_mode;
+        self.follow_up_mode = follow_up_mode;
+    }
+
     fn push_steering(&mut self, message: Message) {
         self.steering.push_back(message);
     }
@@ -2173,11 +2211,23 @@ impl ExtensionInjectedQueue {
     }
 
     fn pop_steering(&mut self) -> Vec<Message> {
-        self.steering.drain(..).collect()
+        match self.steering_mode {
+            QueueMode::All => self.steering.drain(..).collect(),
+            QueueMode::OneAtATime => self.steering.pop_front().into_iter().collect(),
+        }
     }
 
     fn pop_follow_up(&mut self) -> Vec<Message> {
-        self.follow_up.drain(..).collect()
+        match self.follow_up_mode {
+            QueueMode::All => self.follow_up.drain(..).collect(),
+            QueueMode::OneAtATime => self.follow_up.pop_front().into_iter().collect(),
+        }
+    }
+}
+
+impl Default for ExtensionInjectedQueue {
+    fn default() -> Self {
+        Self::new(QueueMode::OneAtATime, QueueMode::OneAtATime)
     }
 }
 
@@ -3067,8 +3117,10 @@ mod extensions_integration_tests {
                 handle: SessionHandle(Arc::clone(&session)),
                 is_streaming: Arc::new(AtomicBool::new(true)),
                 is_compacting: Arc::new(AtomicBool::new(true)),
-                steering_mode: QueueMode::All,
-                follow_up_mode: QueueMode::OneAtATime,
+                queue_modes: Arc::new(StdMutex::new(ExtensionQueueModeState::new(
+                    QueueMode::All,
+                    QueueMode::OneAtATime,
+                ))),
                 auto_compaction_enabled: true,
             };
 
@@ -3087,6 +3139,55 @@ mod extensions_integration_tests {
             assert_eq!(state["autoCompactionEnabled"], true);
             assert_eq!(state["messageCount"], 1);
         });
+    }
+
+    #[test]
+    fn agent_session_set_queue_modes_updates_extension_delivery_state() {
+        let provider = Arc::new(NoopProvider);
+        let tools = ToolRegistry::new(&[], Path::new("."), None);
+        let agent = Agent::new(provider, tools, AgentConfig::default());
+        let session = Arc::new(Mutex::new(Session::in_memory()));
+        let mut agent_session =
+            AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+        let queue_modes = Arc::new(StdMutex::new(ExtensionQueueModeState::new(
+            QueueMode::OneAtATime,
+            QueueMode::OneAtATime,
+        )));
+        let injected_queue = Arc::new(StdMutex::new(ExtensionInjectedQueue::new(
+            QueueMode::OneAtATime,
+            QueueMode::OneAtATime,
+        )));
+        agent_session.extension_queue_modes = Some(Arc::clone(&queue_modes));
+        agent_session.extension_injected_queue = Some(Arc::clone(&injected_queue));
+
+        agent_session.set_queue_modes(QueueMode::All, QueueMode::All);
+
+        assert_eq!(
+            agent_session.agent.queue_modes(),
+            (QueueMode::All, QueueMode::All)
+        );
+        let mirrored = queue_modes.lock().expect("lock queue mode mirror");
+        assert_eq!(mirrored.steering_mode, QueueMode::All);
+        assert_eq!(mirrored.follow_up_mode, QueueMode::All);
+        drop(mirrored);
+
+        let queued_follow_up_len = {
+            let mut queue = injected_queue.lock().expect("lock injected queue");
+            queue.push_follow_up(Message::User(UserMessage {
+                content: UserContent::Text("first".to_string()),
+                timestamp: 0,
+            }));
+            queue.push_follow_up(Message::User(UserMessage {
+                content: UserContent::Text("second".to_string()),
+                timestamp: 0,
+            }));
+            queue.pop_follow_up().len()
+        };
+        assert_eq!(
+            queued_follow_up_len, 2,
+            "updated queue modes should apply to extension-injected follow-ups"
+        );
     }
 
     #[test]
@@ -5043,21 +5144,29 @@ struct AgentExtensionSession {
     handle: SessionHandle,
     is_streaming: Arc<AtomicBool>,
     is_compacting: Arc<AtomicBool>,
-    steering_mode: QueueMode,
-    follow_up_mode: QueueMode,
+    queue_modes: Arc<StdMutex<ExtensionQueueModeState>>,
     auto_compaction_enabled: bool,
 }
 
 impl AgentExtensionSession {
+    fn current_queue_modes(&self) -> (QueueMode, QueueMode) {
+        self.queue_modes
+            .lock()
+            .map_or((QueueMode::OneAtATime, QueueMode::OneAtATime), |state| {
+                (state.steering_mode, state.follow_up_mode)
+            })
+    }
+
     fn state_fallback(&self) -> Value {
+        let (steering_mode, follow_up_mode) = self.current_queue_modes();
         json!({
             "model": null,
             "thinkingLevel": "off",
             "durabilityMode": "balanced",
             "isStreaming": self.is_streaming.load(std::sync::atomic::Ordering::SeqCst),
             "isCompacting": self.is_compacting.load(std::sync::atomic::Ordering::SeqCst),
-            "steeringMode": self.steering_mode.as_str(),
-            "followUpMode": self.follow_up_mode.as_str(),
+            "steeringMode": steering_mode.as_str(),
+            "followUpMode": follow_up_mode.as_str(),
             "sessionFile": null,
             "sessionId": "",
             "sessionName": null,
@@ -5075,6 +5184,7 @@ impl crate::extensions::ExtensionSession for AgentExtensionSession {
         let Ok(session) = self.handle.0.lock(cx.cx()).await else {
             return self.state_fallback();
         };
+        let (steering_mode, follow_up_mode) = self.current_queue_modes();
 
         let session_file = session.path.as_ref().map(|p| p.display().to_string());
         let session_id = session.header.id.clone();
@@ -5109,8 +5219,8 @@ impl crate::extensions::ExtensionSession for AgentExtensionSession {
             "durabilityMode": durability_mode,
             "isStreaming": self.is_streaming.load(std::sync::atomic::Ordering::SeqCst),
             "isCompacting": self.is_compacting.load(std::sync::atomic::Ordering::SeqCst),
-            "steeringMode": self.steering_mode.as_str(),
-            "followUpMode": self.follow_up_mode.as_str(),
+            "steeringMode": steering_mode.as_str(),
+            "followUpMode": follow_up_mode.as_str(),
             "sessionFile": session_file,
             "sessionId": session_id,
             "sessionName": session_name,
@@ -5277,6 +5387,8 @@ impl AgentSession {
             extensions_is_compacting: Arc::new(AtomicBool::new(false)),
             extensions_turn_active: Arc::new(AtomicBool::new(false)),
             extensions_pending_idle_actions: Arc::new(StdMutex::new(VecDeque::new())),
+            extension_queue_modes: None,
+            extension_injected_queue: None,
             compaction_settings,
             compaction_runtime: None,
             runtime_handle: None,
@@ -5311,6 +5423,22 @@ impl AgentSession {
 
     pub fn set_auth_storage(&mut self, auth: AuthStorage) {
         self.auth_storage = Some(auth);
+    }
+
+    pub fn set_queue_modes(&mut self, steering_mode: QueueMode, follow_up_mode: QueueMode) {
+        self.agent.set_queue_modes(steering_mode, follow_up_mode);
+
+        if let Some(queue_modes) = &self.extension_queue_modes
+            && let Ok(mut state) = queue_modes.lock()
+        {
+            state.set_modes(steering_mode, follow_up_mode);
+        }
+
+        if let Some(injected_queue) = &self.extension_injected_queue
+            && let Ok(mut queue) = injected_queue.lock()
+        {
+            queue.set_modes(steering_mode, follow_up_mode);
+        }
     }
 
     pub const fn set_compaction_context_window(&mut self, context_window_tokens: u32) {
@@ -5996,16 +6124,22 @@ impl AgentSession {
         // (after runtime boot) — the JS runtime only needs these when
         // dispatching hostcalls, which happens during extension loading.
         let (steering_mode, follow_up_mode) = self.agent.queue_modes();
+        let queue_modes = Arc::new(StdMutex::new(ExtensionQueueModeState::new(
+            steering_mode,
+            follow_up_mode,
+        )));
         manager.set_session(Arc::new(AgentExtensionSession {
             handle: SessionHandle(self.session.clone()),
             is_streaming: Arc::clone(&self.extensions_is_streaming),
             is_compacting: Arc::clone(&self.extensions_is_compacting),
-            steering_mode,
-            follow_up_mode,
+            queue_modes: Arc::clone(&queue_modes),
             auto_compaction_enabled: self.compaction_settings.enabled,
         }));
 
-        let injected = Arc::new(StdMutex::new(ExtensionInjectedQueue::default()));
+        let injected = Arc::new(StdMutex::new(ExtensionInjectedQueue::new(
+            steering_mode,
+            follow_up_mode,
+        )));
         let host_actions = AgentSessionHostActions {
             session: Arc::clone(&self.session),
             injected: Arc::clone(&injected),
@@ -6013,6 +6147,8 @@ impl AgentSession {
             is_turn_active: Arc::clone(&self.extensions_turn_active),
             pending_idle_actions: Arc::clone(&self.extensions_pending_idle_actions),
         };
+        self.extension_queue_modes = Some(Arc::clone(&queue_modes));
+        self.extension_injected_queue = Some(Arc::clone(&injected));
         manager.set_host_actions(Arc::new(host_actions));
         {
             let steering_queue = Arc::clone(&injected);
