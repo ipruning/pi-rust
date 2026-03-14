@@ -23760,6 +23760,8 @@ async fn await_js_task(
 /// any lock, paying only an atomic increment for the refcount.
 #[derive(Clone, Default)]
 pub(crate) struct RegistrySnapshot {
+    /// Number of registered/loaded extensions.
+    pub extension_count: usize,
     /// Pre-computed set of event names with at least one registered hook.
     pub hook_bitmap: HashSet<String>,
     /// Whether any event hooks are registered at all.
@@ -24252,6 +24254,7 @@ impl ExtensionManager {
         let command_names = Self::precompute_command_names(inner);
 
         RegistrySnapshot {
+            extension_count: inner.extensions.len(),
             hook_bitmap: inner.hook_bitmap.clone(),
             has_any_hooks: !inner.hook_bitmap.is_empty(),
             session: inner.session.clone(),
@@ -27397,6 +27400,11 @@ impl ExtensionManager {
     /// Uses the pre-computed snapshot (RCU) instead of locking the mutex.
     pub fn extension_tool_defs(&self) -> Vec<Value> {
         self.read_snapshot().all_tool_defs.clone()
+    }
+
+    /// Whether any extensions are currently loaded into this manager.
+    pub fn has_loaded_extensions(&self) -> bool {
+        self.read_snapshot().extension_count > 0
     }
 
     pub fn register(&self, payload: RegisterPayload) {

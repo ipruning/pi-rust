@@ -1,6 +1,7 @@
 use super::share::{parse_gist_url_and_id, parse_share_is_public, share_gist_description};
 use super::*;
 use crate::agent::AgentConfig;
+use crate::extensions::{ExtensionManager, PROTOCOL_VERSION, RegisterPayload};
 use crate::model::StreamEvent;
 use crate::provider::{Context, Provider, StreamOptions};
 use crate::resources::{ResourceCliOptions, ResourceLoader};
@@ -101,6 +102,26 @@ fn build_test_app_with_config_and_extensions(
         Vec::new(),
         Usage::default(),
     )
+}
+
+fn test_extension_manager_with_registered_extension() -> ExtensionManager {
+    let manager = ExtensionManager::new();
+    manager.register(RegisterPayload {
+        name: "test-extension".to_string(),
+        version: "1.0.0".to_string(),
+        api_version: PROTOCOL_VERSION.to_string(),
+        capabilities: Vec::new(),
+        capability_manifest: None,
+        tools: Vec::new(),
+        slash_commands: vec![json!({
+            "name": "test-command",
+            "description": "test command",
+        })],
+        shortcuts: Vec::new(),
+        flags: Vec::new(),
+        event_hooks: Vec::new(),
+    });
+    manager
 }
 
 fn custom_test_message(content: &str) -> ModelMessage {
@@ -821,7 +842,7 @@ fn apply_queue_modes_updates_injected_queue_delivery_policy() {
 fn default_permissive_status_mentions_restart_when_extensions_are_active() {
     let app = build_test_app_with_config_and_extensions(
         Config::default(),
-        Some(crate::extensions::ExtensionManager::new()),
+        Some(test_extension_manager_with_registered_extension()),
     );
 
     let status = app.default_permissive_update_status(false);
@@ -832,13 +853,49 @@ fn default_permissive_status_mentions_restart_when_extensions_are_active() {
 fn settings_summary_notes_restart_requirement_for_future_policy_changes() {
     let app = build_test_app_with_config_and_extensions(
         Config::default(),
-        Some(crate::extensions::ExtensionManager::new()),
+        Some(test_extension_manager_with_registered_extension()),
     );
 
     let summary = app.format_settings_summary();
     assert!(summary.contains(
         "extensionPolicy.defaultPermissive: on (future changes apply after extension restart)"
     ));
+}
+
+#[test]
+fn default_permissive_status_omits_restart_when_manager_has_no_loaded_extensions() {
+    let app =
+        build_test_app_with_config_and_extensions(Config::default(), Some(ExtensionManager::new()));
+
+    let status = app.default_permissive_update_status(false);
+    assert!(!status.contains("restart active extensions/session to apply"));
+}
+
+#[test]
+fn settings_summary_omits_restart_requirement_when_manager_has_no_loaded_extensions() {
+    let app =
+        build_test_app_with_config_and_extensions(Config::default(), Some(ExtensionManager::new()));
+
+    let summary = app.format_settings_summary();
+    assert!(summary.contains("extensionPolicy.defaultPermissive: on"));
+    assert!(!summary.contains("future changes apply after extension restart"));
+}
+
+#[test]
+fn settings_overlay_default_permissive_notes_restart_only_for_loaded_extensions() {
+    let app = build_test_app_with_config_and_extensions(
+        Config::default(),
+        Some(test_extension_manager_with_registered_extension()),
+    );
+    let rendered = app.render_settings_ui(&SettingsUiState::new());
+    assert!(rendered.contains("extensionPolicy.defaultPermissive: on (restart required)"));
+
+    let app_without_loaded_extensions =
+        build_test_app_with_config_and_extensions(Config::default(), Some(ExtensionManager::new()));
+    let rendered_without_loaded_extensions =
+        app_without_loaded_extensions.render_settings_ui(&SettingsUiState::new());
+    assert!(rendered_without_loaded_extensions.contains("extensionPolicy.defaultPermissive: on"));
+    assert!(!rendered_without_loaded_extensions.contains("restart required"));
 }
 
 // --- push_line tests ---

@@ -1300,8 +1300,13 @@ impl PiApp {
                         self.config.follow_up_queue_mode().as_str()
                     ),
                     SettingsUiEntry::DefaultPermissive => format!(
-                        "extensionPolicy.defaultPermissive: {}",
-                        bool_label(self.effective_default_permissive())
+                        "extensionPolicy.defaultPermissive: {}{}",
+                        bool_label(self.effective_default_permissive()),
+                        if self.default_permissive_changes_require_extension_restart() {
+                            " (restart required)"
+                        } else {
+                            ""
+                        }
                     ),
                     SettingsUiEntry::QuietStartup => format!(
                         "quietStartup: {}",

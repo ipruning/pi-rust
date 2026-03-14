@@ -699,8 +699,14 @@ impl PiApp {
             .unwrap_or(true)
     }
 
-    const fn default_permissive_changes_require_extension_restart(&self) -> bool {
-        self.extensions.is_some()
+    fn has_loaded_extensions(&self) -> bool {
+        self.extensions
+            .as_ref()
+            .is_some_and(ExtensionManager::has_loaded_extensions)
+    }
+
+    fn default_permissive_changes_require_extension_restart(&self) -> bool {
+        self.has_loaded_extensions()
     }
 
     fn default_permissive_update_status(&self, next: bool) -> String {
