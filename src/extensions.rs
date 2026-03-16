@@ -19207,36 +19207,66 @@ fn discover_auxiliary_example_entries(
     out
 }
 
-fn parse_pi_extensions_from_package(package_json_path: &Path) -> Vec<String> {
-    let Ok(raw) = fs::read_to_string(package_json_path) else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    let Some(entries_value) = json.get("pi").and_then(|pi| pi.get("extensions")) else {
-        return Vec::new();
-    };
-
-    if let Some(entry) = entries_value.as_str() {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            return Vec::new();
-        }
-        return vec![entry.to_owned()];
+fn read_pi_extensions_from_package(package_json_path: &Path) -> Result<Option<Vec<String>>> {
+    if !package_json_path.is_file() {
+        return Ok(None);
     }
 
-    let Some(entries) = entries_value.as_array() else {
-        return Vec::new();
+    let raw = fs::read_to_string(package_json_path).map_err(|err| {
+        Error::config(format!(
+            "Failed to read package manifest {}: {err}",
+            package_json_path.display()
+        ))
+    })?;
+    let json = serde_json::from_str::<Value>(&raw).map_err(|err| {
+        Error::config(format!(
+            "Failed to parse package manifest {}: {err}",
+            package_json_path.display()
+        ))
+    })?;
+    let Some(pi) = json.get("pi") else {
+        return Ok(None);
+    };
+    let Some(pi) = pi.as_object() else {
+        return Err(Error::config(format!(
+            "Invalid package manifest {}: `pi` must be an object",
+            package_json_path.display()
+        )));
+    };
+    let Some(entries_value) = pi.get("extensions") else {
+        return Ok(None);
     };
 
-    entries
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    match entries_value {
+        Value::String(entry) => {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                Ok(Some(Vec::new()))
+            } else {
+                Ok(Some(vec![entry.to_owned()]))
+            }
+        }
+        Value::Array(entries) => {
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Some(entry) = entry.as_str() else {
+                    return Err(Error::config(format!(
+                        "Invalid package manifest {}: `pi.extensions` must be a string or array of strings",
+                        package_json_path.display()
+                    )));
+                };
+                let entry = entry.trim();
+                if !entry.is_empty() {
+                    out.push(entry.to_owned());
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Err(Error::config(format!(
+            "Invalid package manifest {}: `pi.extensions` must be a string or array of strings",
+            package_json_path.display()
+        ))),
+    }
 }
 
 fn parse_package_name_from_package(package_json_path: &Path) -> Option<String> {
@@ -19303,7 +19333,7 @@ fn find_workspace_package_dir_by_name(
 fn resolve_package_declared_entries(
     package_dir: &Path,
     package_entries: &[String],
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let workspace_root = package_dir.parent();
@@ -19325,18 +19355,21 @@ fn resolve_package_declared_entries(
                 find_workspace_package_dir_by_name(workspace_root, &package_name)
         {
             let nested_package_json = workspace_package_dir.join("package.json");
-            let nested_entries = parse_pi_extensions_from_package(&nested_package_json);
-            if nested_entries.is_empty() {
-                if let Some(index_path) =
-                    resolve_extension_entry_file(&workspace_package_dir.join("index"))
-                {
-                    resolved.push(index_path);
+            match read_pi_extensions_from_package(&nested_package_json)? {
+                Some(nested_entries) if !nested_entries.is_empty() => {
+                    resolved.extend(resolve_package_declared_entries(
+                        &workspace_package_dir,
+                        &nested_entries,
+                    )?);
                 }
-            } else {
-                resolved.extend(resolve_package_declared_entries(
-                    &workspace_package_dir,
-                    &nested_entries,
-                ));
+                Some(_) => {}
+                None => {
+                    if let Some(index_path) =
+                        resolve_extension_entry_file(&workspace_package_dir.join("index"))
+                    {
+                        resolved.push(index_path);
+                    }
+                }
             }
         }
 
@@ -19347,12 +19380,12 @@ fn resolve_package_declared_entries(
         }
     }
 
-    out
+    Ok(out)
 }
 
-fn discover_workspace_bundle_entries(package_dir: &Path) -> Vec<PathBuf> {
+fn discover_workspace_bundle_entries(package_dir: &Path) -> Result<Vec<PathBuf>> {
     let Some(workspace_root) = package_dir.parent() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut cluster_dirs = Vec::new();
@@ -19365,7 +19398,7 @@ fn discover_workspace_bundle_entries(package_dir: &Path) -> Vec<PathBuf> {
         }
     }
     if cluster_dirs.is_empty() || cluster_dirs.len() > MAX_BUNDLE_CLUSTER_DIRS {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     cluster_dirs.sort();
 
@@ -19374,11 +19407,10 @@ fn discover_workspace_bundle_entries(package_dir: &Path) -> Vec<PathBuf> {
 
     for dir in &cluster_dirs {
         let package_json = dir.join("package.json");
-        let package_entries = parse_pi_extensions_from_package(&package_json);
-        if package_entries.is_empty() {
+        let Some(package_entries) = read_pi_extensions_from_package(&package_json)? else {
             continue;
-        }
-        for path in resolve_package_declared_entries(dir, &package_entries) {
+        };
+        for path in resolve_package_declared_entries(dir, &package_entries)? {
             if seen.insert(path.clone()) {
                 out.push(path);
             }
@@ -19412,7 +19444,7 @@ fn discover_workspace_bundle_entries(package_dir: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn discover_sibling_index_entries(primary: &Path) -> Vec<PathBuf> {
@@ -19540,7 +19572,7 @@ fn discover_sibling_extension_entries(primary: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn discover_related_extension_entries(primary: &Path) -> Vec<PathBuf> {
+fn discover_related_extension_entries(primary: &Path) -> Result<Vec<PathBuf>> {
     let canonical_primary = safe_canonicalize(primary);
     let mut out = vec![canonical_primary.clone()];
     let mut seen = BTreeSet::new();
@@ -19549,15 +19581,16 @@ fn discover_related_extension_entries(primary: &Path) -> Vec<PathBuf> {
     let mut selected_package_dir: Option<PathBuf> = None;
     let mut selected_package_entries_len = 0usize;
     let mut selected_resolved: Vec<PathBuf> = Vec::new();
+    let mut saw_manifest_extensions = false;
     for package_json in find_package_json_ancestors(primary.parent()) {
         let Some(package_dir) = package_json.parent() else {
             continue;
         };
-        let package_entries = parse_pi_extensions_from_package(&package_json);
-        if package_entries.is_empty() {
+        let Some(package_entries) = read_pi_extensions_from_package(&package_json)? else {
             continue;
-        }
-        let resolved = resolve_package_declared_entries(package_dir, &package_entries);
+        };
+        saw_manifest_extensions = true;
+        let resolved = resolve_package_declared_entries(package_dir, &package_entries)?;
         if !resolved.contains(&canonical_primary) {
             continue;
         }
@@ -19581,7 +19614,7 @@ fn discover_related_extension_entries(primary: &Path) -> Vec<PathBuf> {
             .is_some_and(|stem| stem.eq_ignore_ascii_case("index"));
         if selected_package_entries_len == 1 && is_primary_index {
             if let Some(package_dir) = selected_package_dir.as_deref() {
-                let bundle_entries = discover_workspace_bundle_entries(package_dir);
+                let bundle_entries = discover_workspace_bundle_entries(package_dir)?;
                 if bundle_entries.len() >= 2
                     && bundle_entries.iter().any(|path| path == &canonical_primary)
                 {
@@ -19593,6 +19626,8 @@ fn discover_related_extension_entries(primary: &Path) -> Vec<PathBuf> {
                 }
             }
         }
+    } else if saw_manifest_extensions {
+        return Ok(out);
     }
 
     for path in discover_sibling_extension_entries(&canonical_primary) {
@@ -19618,7 +19653,7 @@ fn discover_related_extension_entries(primary: &Path) -> Vec<PathBuf> {
         }
     }
 
-    out
+    Ok(out)
 }
 
 #[allow(clippy::future_not_send)]
@@ -19639,7 +19674,7 @@ async fn load_one_extension(
     host: &JsRuntimeHost,
     spec: &JsExtensionLoadSpec,
 ) -> Result<()> {
-    let entry_paths = discover_related_extension_entries(&spec.entry_path);
+    let entry_paths = discover_related_extension_entries(&spec.entry_path)?;
     if entry_paths.len() > 1 {
         tracing::info!(
             event = "ext.load.multi_entry",
@@ -28948,7 +28983,18 @@ fn build_compat_registration_hints(
 ) -> HashMap<String, CompatRegistrationHints> {
     let mut out: HashMap<String, CompatRegistrationHints> = HashMap::new();
     for spec in specs {
-        let entry_paths = discover_related_extension_entries(&spec.entry_path);
+        let entry_paths = match discover_related_extension_entries(&spec.entry_path) {
+            Ok(entry_paths) => entry_paths,
+            Err(err) => {
+                tracing::warn!(
+                    extension_id = %spec.extension_id,
+                    path = %spec.entry_path.display(),
+                    error = %err,
+                    "Skipping compat hint inference for extension with invalid package manifest"
+                );
+                continue;
+            }
+        };
         if entry_paths.is_empty() {
             continue;
         }
@@ -29046,8 +29092,8 @@ mod tests {
         std::fs::write(&package_json, r#"{ "pi": { "extensions": "./index.ts" } }"#)
             .expect("write package.json");
         assert_eq!(
-            parse_pi_extensions_from_package(&package_json),
-            vec!["./index.ts".to_string()]
+            read_pi_extensions_from_package(&package_json).expect("parse package.json"),
+            Some(vec!["./index.ts".to_string()])
         );
 
         std::fs::write(
@@ -29056,8 +29102,37 @@ mod tests {
         )
         .expect("write package.json array");
         assert_eq!(
-            parse_pi_extensions_from_package(&package_json),
-            vec!["./a.ts".to_string(), "./b.ts".to_string()]
+            read_pi_extensions_from_package(&package_json).expect("parse package.json"),
+            Some(vec!["./a.ts".to_string(), "./b.ts".to_string()])
+        );
+    }
+
+    #[test]
+    fn read_pi_extensions_errors_on_malformed_package_json() {
+        let temp = tempdir().expect("tempdir");
+        let package_json = temp.path().join("package.json");
+        std::fs::write(&package_json, "{ not valid json").expect("write malformed package.json");
+
+        let err = read_pi_extensions_from_package(&package_json)
+            .expect_err("malformed package.json must error");
+        assert!(err.to_string().contains("Failed to parse package manifest"));
+    }
+
+    #[test]
+    fn read_pi_extensions_errors_on_invalid_extensions_shape() {
+        let temp = tempdir().expect("tempdir");
+        let package_json = temp.path().join("package.json");
+        std::fs::write(
+            &package_json,
+            r#"{ "pi": { "extensions": [1, "./index.ts"] } }"#,
+        )
+        .expect("write invalid package.json");
+
+        let err = read_pi_extensions_from_package(&package_json)
+            .expect_err("non-string package entries must error");
+        assert!(
+            err.to_string()
+                .contains("`pi.extensions` must be a string or array of strings")
         );
     }
 
@@ -29145,7 +29220,8 @@ mod tests {
         std::fs::write(&a_path, "export default {};\n").expect("write a.ts");
         std::fs::write(&b_path, "export default {};\n").expect("write b.ts");
 
-        let discovered = discover_related_extension_entries(&b_path);
+        let discovered =
+            discover_related_extension_entries(&b_path).expect("discover package entries");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&a_path)));
         assert!(discovered.contains(&safe_canonicalize(&b_path)));
@@ -29197,7 +29273,8 @@ mod tests {
         )
         .expect("write root package");
 
-        let discovered = discover_related_extension_entries(&nested_entry);
+        let discovered =
+            discover_related_extension_entries(&nested_entry).expect("discover bundle entries");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&nested_entry)));
         assert!(discovered.contains(&safe_canonicalize(&code_entry)));
@@ -29214,7 +29291,8 @@ mod tests {
         std::fs::write(&a, "export default function initA(_pi) {}\n").expect("write a");
         std::fs::write(&b, "export default function initB(_pi) {}\n").expect("write b");
 
-        let discovered = discover_related_extension_entries(&a);
+        let discovered =
+            discover_related_extension_entries(&a).expect("discover flat sibling entries");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&a)));
         assert!(discovered.contains(&safe_canonicalize(&b)));
@@ -29231,7 +29309,8 @@ mod tests {
         std::fs::write(&alpha, "export async function activate(_pi) {}\n").expect("write alpha");
         std::fs::write(&beta, "export function initialize(_pi) {}\n").expect("write beta");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered =
+            discover_related_extension_entries(&alpha).expect("discover named initializer");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&alpha)));
         assert!(discovered.contains(&safe_canonicalize(&beta)));
@@ -29249,7 +29328,8 @@ mod tests {
         std::fs::write(&beta, "export default { initialize: async (_pi) => {} };\n")
             .expect("write beta");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered =
+            discover_related_extension_entries(&alpha).expect("discover default object");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&alpha)));
         assert!(discovered.contains(&safe_canonicalize(&beta)));
@@ -29270,7 +29350,8 @@ mod tests {
         )
         .expect("write beta");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered =
+            discover_related_extension_entries(&alpha).expect("discover quoted object");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&alpha)));
         assert!(discovered.contains(&safe_canonicalize(&beta)));
@@ -29287,7 +29368,8 @@ mod tests {
         std::fs::write(&alpha, "export default { activate(_pi) {} };\n").expect("write alpha");
         std::fs::write(&beta, "export default { \"initialize\"(_pi) {} };\n").expect("write beta");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered =
+            discover_related_extension_entries(&alpha).expect("discover quoted object method");
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&safe_canonicalize(&alpha)));
         assert!(discovered.contains(&safe_canonicalize(&beta)));
@@ -29306,7 +29388,8 @@ mod tests {
         std::fs::write(&helper, "export const initialize = 'not callable';\n")
             .expect("write helper");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered = discover_related_extension_entries(&alpha)
+            .expect("discover should keep callable siblings only");
         assert_eq!(discovered, vec![safe_canonicalize(&alpha)]);
     }
 
@@ -29322,7 +29405,8 @@ mod tests {
         std::fs::write(&alpha, "export default { activate(_pi) {} };\n").expect("write alpha");
         std::fs::write(&helper, "export default { initialize: true };\n").expect("write helper");
 
-        let discovered = discover_related_extension_entries(&alpha);
+        let discovered = discover_related_extension_entries(&alpha)
+            .expect("discover should ignore non-callable object values");
         assert_eq!(discovered, vec![safe_canonicalize(&alpha)]);
     }
 
@@ -29339,8 +29423,52 @@ mod tests {
         std::fs::write(&helper, "export class DoomEngine {}\n").expect("write helper");
         std::fs::write(&util, "export function ensureWadFile() {}\n").expect("write util");
 
-        let discovered = discover_related_extension_entries(&index);
+        let discovered = discover_related_extension_entries(&index)
+            .expect("discover should ignore flat helpers");
         assert_eq!(discovered, vec![safe_canonicalize(&index)]);
+    }
+
+    #[test]
+    fn discover_related_extension_entries_errors_on_malformed_package_manifest() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("pkg");
+        std::fs::create_dir_all(&root).expect("mkdir pkg");
+
+        let index = root.join("index.ts");
+        let helper = root.join("helper.ts");
+        std::fs::write(&index, "export default function init(_pi) {}\n").expect("write index");
+        std::fs::write(&helper, "export default function extra(_pi) {}\n").expect("write helper");
+        std::fs::write(root.join("package.json"), "{ not valid json")
+            .expect("write malformed package.json");
+
+        let err = discover_related_extension_entries(&index)
+            .expect_err("malformed ancestor package.json must error");
+        assert!(err.to_string().contains("Failed to parse package manifest"));
+    }
+
+    #[test]
+    fn discover_related_extension_entries_keeps_primary_when_manifest_explicitly_disables_bundle() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("pkg");
+        std::fs::create_dir_all(&root).expect("mkdir pkg");
+
+        let index = root.join("index.ts");
+        let helper = root.join("helper.ts");
+        std::fs::write(&index, "export default function init(_pi) {}\n").expect("write index");
+        std::fs::write(&helper, "export default function extra(_pi) {}\n").expect("write helper");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "pi": { "extensions": [] } }"#,
+        )
+        .expect("write package.json");
+
+        let discovered = discover_related_extension_entries(&index)
+            .expect("explicit empty manifest should not error");
+        assert_eq!(
+            discovered,
+            vec![safe_canonicalize(&index)],
+            "explicit empty pi.extensions should suppress heuristic bundle expansion"
+        );
     }
 
     #[test]
@@ -29370,7 +29498,8 @@ mod tests {
         .expect("write example entry");
         std::fs::write(&helper, "export const helper = true;\n").expect("write helper");
 
-        let discovered = discover_related_extension_entries(&primary);
+        let discovered =
+            discover_related_extension_entries(&primary).expect("discover example entries");
         assert!(discovered.contains(&safe_canonicalize(&primary)));
         assert!(discovered.contains(&safe_canonicalize(&example_entry)));
         assert!(
@@ -29395,7 +29524,8 @@ mod tests {
         std::fs::write(&a_helper, "export const helper = true;\n").expect("write a helper");
         std::fs::write(&b_index, "export default {};\n").expect("write b index");
 
-        let discovered = discover_related_extension_entries(&a_index);
+        let discovered =
+            discover_related_extension_entries(&a_index).expect("discover sibling indexes");
         assert!(discovered.contains(&safe_canonicalize(&a_index)));
         assert!(
             !discovered.contains(&safe_canonicalize(&a_helper)),
@@ -29427,7 +29557,8 @@ mod tests {
             .expect("write sibling package");
         }
 
-        let discovered = discover_workspace_bundle_entries(&package_dir);
+        let discovered =
+            discover_workspace_bundle_entries(&package_dir).expect("discover workspace bundle");
         assert!(discovered.is_empty());
     }
 
