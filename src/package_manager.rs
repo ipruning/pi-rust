@@ -2660,6 +2660,7 @@ fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
         Ok(None) => {}
         Err(err) => {
             warn!(path = %dir.display(), "Invalid extension manifest: {err}");
+            return None;
         }
     }
 
@@ -4502,6 +4503,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_resolve_extension_entries_skips_invalid_extension_manifest() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let extension_dir = temp_dir.path().join("ext");
+        fs::create_dir_all(&extension_dir).expect("create extension dir");
+        fs::write(extension_dir.join("extension.json"), "{ not valid json")
+            .expect("write malformed extension.json");
+        fs::write(extension_dir.join("index.ts"), "export {};\n").expect("write fallback entry");
+
+        assert!(
+            resolve_extension_entries(&extension_dir).is_none(),
+            "invalid extension.json should not fall back to index.* entrypoints"
+        );
+    }
+
     // ======================================================================
     // is_pattern / split_patterns
     // ======================================================================
@@ -5782,6 +5798,22 @@ mod tests {
         assert!(
             entries.is_empty(),
             "malformed root package.json must not fall back to conventional entrypoints"
+        );
+    }
+
+    #[test]
+    fn collect_auto_extension_entries_fail_closed_on_malformed_root_extension_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ext_dir = dir.path().join("extensions");
+        fs::create_dir_all(&ext_dir).expect("create dir");
+        fs::write(ext_dir.join("extension.json"), "{ not valid json")
+            .expect("write malformed extension.json");
+        fs::write(ext_dir.join("index.ts"), "export default {}").expect("write index.ts");
+
+        let entries = collect_auto_extension_entries(&ext_dir);
+        assert!(
+            entries.is_empty(),
+            "malformed root extension.json must not fall back to conventional entrypoints"
         );
     }
 
